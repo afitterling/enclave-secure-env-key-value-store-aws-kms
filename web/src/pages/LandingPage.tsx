@@ -8,11 +8,11 @@ pip install -e cli/
 enclave configure --api-url https://<your-api>.execute-api.<region>.amazonaws.com
 enclave login you@example.com
 
-# push an env file — encrypted locally before upload
-enclave push --project my-app --stage dev .env
+# push your app's env files — encrypted locally before upload
+enclave push --project my-app --stage dev .env .env.local
 
-# pull it on another device
-enclave pull --project my-app --stage dev --dest ~/`;
+# pull them on another device
+enclave pull --project my-app --stage dev --dest ./`;
 
 const WEB_QUICKSTART = `1  Sign in with your email — a one-time code arrives by mail.
 2  Create a project. You become its owner, with all four stages.
@@ -60,7 +60,7 @@ export default function LandingPage() {
 
       {/* ---- hero ---------------------------------------------------- */}
       <section className="hero">
-        <p className="kicker">end-to-end encrypted env &amp; dotfile vault</p>
+        <p className="kicker">end-to-end encrypted environment files</p>
         <h1>
           Your secrets never
           <br />
@@ -68,10 +68,12 @@ export default function LandingPage() {
           <span className="cursor">_</span>
         </h1>
         <p className="sub" style={{ maxWidth: "52ch" }}>
-          enclave-envoy syncs <code>.env</code> files and dotfiles across devices and
-          teammates. Files are encrypted <em>in your browser or CLI</em> with AES-256-GCM
-          under an AWS&nbsp;KMS-wrapped data key — S3 and every server in between only ever
-          see ciphertext.
+          enclave-envoy syncs the environment files of your development stacks —{" "}
+          <code>.env</code>, <code>.env.local</code>, <code>.env.production</code> from
+          React, Next, Vite, Node and friends — across devices and teammates. Files are
+          encrypted <em>in your browser or CLI</em> with AES-256-GCM under an
+          AWS&nbsp;KMS-wrapped data key — S3 and every server in between only ever see
+          ciphertext.
         </p>
         <div className="hero-cta">
           <Link className="btn primary" to="/login">
@@ -112,8 +114,9 @@ export default function LandingPage() {
             <span className="tag accent">python</span>
             <h3>CLI</h3>
             <p>
-              <code>enclave push / pull</code> for whole-directory dotfile sync.{" "}
-              <code>cryptography</code>-based AES-256-GCM, keys zeroized after use.
+              <code>enclave push / pull</code> for your project's <code>.env*</code> files
+              (or any secret file). <code>cryptography</code>-based AES-256-GCM, keys
+              zeroized after use.
             </p>
           </div>
           <div className="lang-card">

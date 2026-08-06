@@ -42,7 +42,7 @@ export default function LoginPage() {
       <div className="login">
         <p className="kicker">
           <Link to="/" style={{ color: "inherit", textDecoration: "none" }}>
-            ← encrypted dotfile vault
+            ← encrypted environment files
           </Link>
         </p>
         <p className="brand" style={{ marginTop: 0 }}>

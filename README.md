@@ -1,9 +1,13 @@
 # enclave-envoy
 
-Securely store and sync dotfiles and env files across multiple devices using **AWS S3** for
-storage and **AWS KMS** for envelope encryption, with **passwordless email (OTP) authentication**.
-Comes with a **web UI** (browser-side encryption, masked KEY=VALUE viewer, self-service
-projects & teams) and a **Python CLI** that share the same byte-compatible envelope format.
+Securely store, sync and share the **environment files of your development stacks** —
+`.env`, `.env.local`, `.env.production` and friends from React/Next/Vite, Node, Python
+or any other project — across devices and teammates, using **AWS S3** for storage and
+**AWS KMS** for envelope encryption, with **passwordless email (OTP) authentication**.
+Comes with a **web UI** (browser-side encryption; env files render as a KEY=VALUE table
+with values hidden until revealed) and a **Python CLI** that share the same
+byte-compatible envelope format. Files are opaque encrypted blobs, so other secret-like
+files work too — but environment files are what it is built for.
 
 ```
 device A ──encrypt──► S3 (project-id/stage/file)  ◄──decrypt── device B
@@ -87,13 +91,13 @@ pip install -e .
 enclave configure --api-url https://xxxx.execute-api.eu-central-1.amazonaws.com
 enclave login alice@example.com          # → enter the 6-digit code from your inbox
 
-# push every dotfile in $HOME for project "laptop", stage "personal"
-enclave push --project laptop --stage personal ~/.zshrc ~/.gitconfig ~/.vimrc
-# or sweep a directory:
-enclave push --project laptop --stage personal --glob "$HOME/.*"
+# push your app's environment files for project "webapp", stage "dev"
+enclave push --project webapp --stage dev .env .env.local
+# or sweep every env file in the project directory:
+enclave push --project webapp --stage dev --glob "./.env*"
 
-# on another device, after logging in:
-enclave pull --project laptop --stage personal --dest ~/
+# on another device (or a teammate's), after logging in:
+enclave pull --project webapp --stage dev --dest ./
 ```
 
 ## Security notes / things to harden before production
