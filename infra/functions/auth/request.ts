@@ -77,9 +77,11 @@ export async function handler(event: APIGatewayProxyEventV2) {
           },
         }),
       );
-    } catch {
-      // Swallow SES errors (sandbox, suppression, quota) — surfacing them would
-      // turn a known address into a 5xx oracle. The user can request again.
+    } catch (err) {
+      // Never surface SES errors to the caller — that would turn a known
+      // address into a 5xx oracle. Log them, though: a misconfigured sender or
+      // IAM scope would otherwise break login completely and silently.
+      console.error("SES send failed", { name: (err as Error)?.name, message: (err as Error)?.message });
     }
   }
 

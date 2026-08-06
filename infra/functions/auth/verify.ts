@@ -33,8 +33,10 @@ export async function handler(event: APIGatewayProxyEventV2) {
         TableName: process.env.OTP_TABLE,
         Key: { email: normalized },
         UpdateExpression: "SET attempts = if_not_exists(attempts, :z) + :one",
+        // NB: if_not_exists() is only valid in an UpdateExpression — DynamoDB
+        // rejects it inside a ConditionExpression, hence attribute_not_exists.
         ConditionExpression:
-          "attribute_exists(email) AND expiresAt > :now AND if_not_exists(attempts, :z) < :max",
+          "attribute_exists(email) AND expiresAt > :now AND (attribute_not_exists(attempts) OR attempts < :max)",
         ExpressionAttributeValues: { ":z": 0, ":one": 1, ":now": now, ":max": MAX_ATTEMPTS },
         ReturnValues: "ALL_NEW",
       }),

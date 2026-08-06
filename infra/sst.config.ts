@@ -223,9 +223,14 @@ export default $config({
         accessRead,
         { actions: ["dynamodb:PutItem"], resources: [otpTable.arn] },
         {
+          // Scoped to our own identity (so a compromise can't spoof other
+          // verified domains). SendEmail is also authorized against the
+          // identity's default configuration set, which must be allowed too —
+          // omitting it fails closed with AccessDenied.
           actions: ["ses:SendEmail"],
           resources: [
             $interpolate`arn:aws:ses:${region.name}:${accountId}:identity/${sesIdentity}`,
+            $interpolate`arn:aws:ses:${region.name}:${accountId}:configuration-set/*`,
           ],
         },
       ],
