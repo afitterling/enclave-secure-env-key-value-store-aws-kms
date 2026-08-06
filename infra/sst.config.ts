@@ -24,6 +24,11 @@ const stages = ["dev", "staging", "prod", "personal"];
 // projects). Everyone else must be invited to a project or team first.
 const adminEmails = ["info@sp33c.tech"];
 
+// The verified SES identity OTP mail is sent from. Used to scope the
+// ses:SendEmail grant to exactly this identity (not every identity in the
+// account). A domain identity covers any address at that domain.
+const sesIdentity = "sp33c.tech";
+
 // Edition: "opensource" is the core (projects, encrypted upload/view, CLI);
 // "enterprise" adds team management. Editions are presets over the feature
 // toggles below — individual flags can still be overridden after the spread.
@@ -66,6 +71,11 @@ export default $config({
     // `npx sst secret set JwtSigningKey "$(openssl rand -hex 32)"`
     const jwtKey = new sst.Secret("JwtSigningKey");
 
+    // Confused-deputy guard: the presign Lambda must present this ExternalId to
+    // assume a stage role, so an unrelated in-account principal that merely
+    // holds sts:AssumeRole cannot. `npx sst secret set StageAssumeExternalId ...`
+    const assumeExternalId = new sst.Secret("StageAssumeExternalId");
+
     // ---- KMS master key ---------------------------------------------------
     const key = new aws.kms.Key("EnclaveMasterKey", {
       description: "enclave-envoy envelope-encryption master key",
@@ -100,13 +110,18 @@ export default $config({
     const stageRoles = stages.map((stage) => {
       const role = new aws.iam.Role(`StageRole-${stage}`, {
         name: `enclave-envoy-${$app.stage}-${stage}`,
-        assumeRolePolicy: JSON.stringify({
+        // Root-principal trust avoids a create-order cycle with the presign
+        // function role, but is gated on a secret ExternalId so that only the
+        // presign Lambda (which knows it) can actually assume the role — a bare
+        // in-account sts:AssumeRole is no longer sufficient.
+        assumeRolePolicy: $jsonStringify({
           Version: "2012-10-17",
           Statement: [
             {
               Effect: "Allow",
               Principal: { AWS: `arn:aws:iam::${accountId}:root` },
               Action: "sts:AssumeRole",
+              Condition: { StringEquals: { "sts:ExternalId": assumeExternalId.value } },
             },
           ],
         }),
@@ -140,14 +155,15 @@ export default $config({
                 Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
                 Resource: $interpolate`arn:aws:s3:::${args.bucket}/*/${stage}/*`,
               });
-              // Listing: stage roles may List the bucket (objects stay
-              // encrypted); the clients only list their own prefix anyway.
+              // Listing: stage roles may List the bucket, but only under their
+              // own stage prefix (objects stay encrypted regardless).
               policy.Statement.push({
                 Sid: `Stage_${stage}_list`,
                 Effect: "Allow",
                 Principal: { AWS: role.arn },
                 Action: ["s3:ListBucket"],
                 Resource: $interpolate`arn:aws:s3:::${args.bucket}`,
+                Condition: { StringLike: { "s3:prefix": [`*/${stage}/*`, `*/${stage}`] } },
               });
             }
           });
@@ -160,11 +176,22 @@ export default $config({
     );
 
     // ---- HTTP API + functions --------------------------------------------
+    // Stage-wide throttle caps brute-force / abuse volume (the force multiplier
+    // for OTP guessing, SES bombing and KMS/Dynamo cost abuse). A WAFv2
+    // rate-based rule keyed on IP is a recommended additional layer.
     const api = new sst.aws.ApiGatewayV2("Api", {
       cors: {
         allowOrigins: ["*"],
         allowMethods: ["GET", "POST"],
         allowHeaders: ["authorization", "content-type"],
+      },
+      transform: {
+        stage: {
+          defaultRouteSettings: {
+            throttlingRateLimit: 20, // steady-state requests/sec across the API
+            throttlingBurstLimit: 40,
+          },
+        },
       },
     });
 
@@ -195,7 +222,12 @@ export default $config({
       permissions: [
         accessRead,
         { actions: ["dynamodb:PutItem"], resources: [otpTable.arn] },
-        { actions: ["ses:SendEmail"], resources: ["*"] },
+        {
+          actions: ["ses:SendEmail"],
+          resources: [
+            $interpolate`arn:aws:ses:${region.name}:${accountId}:identity/${sesIdentity}`,
+          ],
+        },
       ],
     });
 
@@ -228,7 +260,12 @@ export default $config({
 
     api.route("POST /s3/presign", {
       handler: "functions/s3/presign.handler",
-      environment: { ...baseEnv, BUCKET: bucket.name, STAGE_ROLE_ARNS: stageRoleArns },
+      environment: {
+        ...baseEnv,
+        BUCKET: bucket.name,
+        STAGE_ROLE_ARNS: stageRoleArns,
+        STAGE_ASSUME_EXTERNAL_ID: assumeExternalId.value,
+      },
       permissions: [
         accessRead,
         {

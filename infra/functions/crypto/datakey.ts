@@ -27,6 +27,11 @@ interface Body {
   ciphertext?: string; // base64, required for op=decrypt
 }
 
+// Same rule presign uses — reject non-string / structured values so they can't
+// diverge the KMS encryption context from the string form used at generate.
+const safeName = (name: unknown): name is string =>
+  typeof name === "string" && /^[\w.@+-]+$/.test(name);
+
 export async function handler(event: APIGatewayProxyEventV2) {
   let email: string;
   try {
@@ -37,6 +42,7 @@ export async function handler(event: APIGatewayProxyEventV2) {
 
   const { op, project, stage, ciphertext } = parseBody<Body>(event);
   if (!op || !project || !stage) return badRequest("op, project and stage are required");
+  if (!safeName(project) || !safeName(stage)) return badRequest("invalid project/stage");
   if (!(await canAccess(email, project, stage))) return forbidden("no access to this project/stage");
 
   const encryptionContext = { project, stage, app: "enclave-envoy" };
@@ -59,6 +65,7 @@ export async function handler(event: APIGatewayProxyEventV2) {
     if (!ciphertext) return badRequest("ciphertext is required for decrypt");
     const out = await kms.send(
       new DecryptCommand({
+        KeyId: process.env.KMS_KEY_ID, // pin the key; don't let the blob select it
         CiphertextBlob: Buffer.from(ciphertext, "base64"),
         EncryptionContext: encryptionContext, // must match what generate used
       }),

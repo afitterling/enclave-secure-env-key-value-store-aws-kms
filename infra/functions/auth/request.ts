@@ -9,6 +9,9 @@ import { ok, badRequest, parseBody } from "../lib/response.js";
 const OTP_DIGITS = 6;
 const TTL_SECONDS = 600; // code valid for 10 minutes
 const RESEND_SECONDS = 60; // minimum gap between OTP mails per address
+const FLOOR_MS = 600; // constant-time floor so known/unknown paths look alike
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const ddb = DynamoDBDocumentClient.from(
   new DynamoDBClient({ region: process.env.ENCLAVE_REGION }),
@@ -19,6 +22,13 @@ const hashCode = (email: string, code: string) =>
   createHash("sha256").update(`${email}:${code}`).digest("hex");
 
 export async function handler(event: APIGatewayProxyEventV2) {
+  const started = Date.now();
+  const genericAfterFloor = async () => {
+    // Equalize latency so the known vs unknown path can't be timed apart.
+    await sleep(Math.max(0, FLOOR_MS - (Date.now() - started)));
+    return ok({ message: "If that address is registered, a login code has been sent." });
+  };
+
   const { email } = parseBody<{ email?: string }>(event);
   if (!email) return badRequest("email is required");
   const normalized = normalizeEmail(email);
@@ -46,28 +56,32 @@ export async function handler(event: APIGatewayProxyEventV2) {
           ExpressionAttributeValues: { ":cutoff": now - RESEND_SECONDS },
         }),
       );
-    } catch (err: unknown) {
-      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
-        return ok({ message: "If that address is registered, a login code has been sent." });
-      }
-      throw err;
+    } catch {
+      // Throttled resend, or (any) write error — return the same generic 200.
+      // A failure here must never distinguish this address from an unknown one.
+      return genericAfterFloor();
     }
 
-    await ses.send(
-      new SendEmailCommand({
-        Source: process.env.SES_SENDER,
-        Destination: { ToAddresses: [normalized] },
-        Message: {
-          Subject: { Data: "Your enclave-envoy login code" },
-          Body: {
-            Text: {
-              Data: `Your one-time login code is ${code}\n\nIt expires in ${TTL_SECONDS / 60} minutes. If you did not request this, ignore this email.`,
+    try {
+      await ses.send(
+        new SendEmailCommand({
+          Source: process.env.SES_SENDER,
+          Destination: { ToAddresses: [normalized] },
+          Message: {
+            Subject: { Data: "Your enclave-envoy login code" },
+            Body: {
+              Text: {
+                Data: `Your one-time login code is ${code}\n\nIt expires in ${TTL_SECONDS / 60} minutes. If you did not request this, ignore this email.`,
+              },
             },
           },
-        },
-      }),
-    );
+        }),
+      );
+    } catch {
+      // Swallow SES errors (sandbox, suppression, quota) — surfacing them would
+      // turn a known address into a 5xx oracle. The user can request again.
+    }
   }
 
-  return ok({ message: "If that address is registered, a login code has been sent." });
+  return genericAfterFloor();
 }

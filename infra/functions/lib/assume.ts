@@ -20,6 +20,8 @@ export async function s3ForStage(stage: string, sessionName: string): Promise<S3
       RoleArn: roleArn,
       RoleSessionName: sessionName.replace(/[^\w+=,.@-]/g, "_").slice(0, 64),
       DurationSeconds: 900,
+      // Required by the stage-role trust policy (confused-deputy guard).
+      ExternalId: process.env.STAGE_ASSUME_EXTERNAL_ID,
     }),
   );
   const c = out.Credentials!;

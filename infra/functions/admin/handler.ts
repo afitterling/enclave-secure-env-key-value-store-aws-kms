@@ -40,16 +40,18 @@ const ddb = DynamoDBDocumentClient.from(
 const TABLE = () => process.env.ACCESS_TABLE!;
 
 const safeName = (name: string) => /^[\w.@+-]+$/.test(name);
+// Pragmatic address check: local@domain.tld, no spaces, one @.
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const conflict = (msg: string) => json(409, { error: msg });
 const notFound = (msg = "not found") => json(404, { error: msg });
 
 function validStageList(stages: unknown): string[] | null {
-  if (!Array.isArray(stages) || stages.length === 0) return null;
+  if (!Array.isArray(stages)) return null;
+  const input = [...new Set(stages)].filter((s): s is string => typeof s === "string");
+  if (input.length === 0) return null;
   const valid = validStages();
-  const clean = [...new Set(stages)].filter(
-    (s): s is string => typeof s === "string" && valid.includes(s),
-  );
-  return clean.length === stages.length ? valid.filter((s) => clean.includes(s)) : null;
+  if (!input.every((s) => valid.includes(s))) return null; // any unknown stage -> reject
+  return valid.filter((s) => input.includes(s)); // canonical order, deduped
 }
 
 async function getMeta(pk: string) {
@@ -152,9 +154,11 @@ async function createProject(email: string, body: Record<string, unknown>) {
 
 async function projectDetail(email: string, project: string) {
   const meta = await getMeta(`PROJECT#${project}`);
+  // Return 404 whether the project is missing OR the caller isn't a member, so
+  // the endpoint can't be used to enumerate the global project namespace.
   if (!meta) return notFound("no such project");
   const me = await getMember(`PROJECT#${project}`, email);
-  if (!me) return forbidden("not a member of this project");
+  if (!me) return notFound("no such project");
   const members = (await queryPrefix(`PROJECT#${project}`, "MEMBER#")).map((m) => ({
     email: (m.sk as string).slice("MEMBER#".length),
     role: m.role as string,
@@ -179,7 +183,7 @@ async function upsertProjectMember(email: string, project: string, body: Record<
   const denied = await requireOwner(`PROJECT#${project}`, email);
   if (denied) return denied;
   const invitee = typeof body.email === "string" ? normalizeEmail(body.email) : "";
-  if (!invitee || !invitee.includes("@")) return badRequest("a valid email is required");
+  if (!EMAIL.test(invitee)) return badRequest("a valid email is required");
   const stages = validStageList(body.stages);
   if (!stages) return badRequest(`stages must be a non-empty subset of ${validStages().join(", ")}`);
   const existing = await getMember(`PROJECT#${project}`, invitee);

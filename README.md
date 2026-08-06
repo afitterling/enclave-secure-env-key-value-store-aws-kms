@@ -29,7 +29,7 @@ device A ──encrypt──► S3 (project-id/stage/file)  ◄──decrypt─�
 | Three folders (CLI + infra + web)            | [`cli/`](./cli), [`infra/`](./infra) and [`web/`](./web)                   |
 
 The CLI **never holds AWS credentials**. It only ever has a short-lived JWT session token; every
-AWS action (KMS, S3) is brokered by a Lambda that re-checks the YAML on every call.
+AWS action (KMS, S3) is brokered by a Lambda that re-checks the DynamoDB access map on every call.
 
 ## Repo layout
 
@@ -112,6 +112,11 @@ enclave pull --project webapp --stage dev --dest ./
   security boundary.
 - The web session JWT is kept in localStorage (12 h expiry) — acceptable for a first-party SPA
   with no third-party scripts; switch to in-memory if you embed anything untrusted.
-- The bucket denies non-TLS requests and unencrypted `PutObject`.
+- The bucket denies non-TLS requests (`enforceHttps`). Stage IAM roles are scoped by bucket
+  policy to their own `*/<stage>/*` prefix and require a secret `ExternalId` to assume, so a bare
+  in-account `sts:AssumeRole` can't reach the vault.
+- The API has a stage-wide request throttle; OTP verification reserves each of its five attempts
+  atomically (a conditional DynamoDB update), so the code space isn't brute-forceable by
+  concurrent requests. Session JWTs are HS256, carry `iss`/`aud`, and expire in 1 hour.
 - `cd cli && pytest` and `cd web && npm test` assert both clients produce byte-identical
   envelopes via the shared fixture in `testdata/envelope-vector.json`.
