@@ -35,11 +35,13 @@ const sesIdentity = "sp33c.tech";
 // PREREQUISITE, and the deploy fails without it: SST has to be able to write
 // the ACM validation records. A Route 53 hosted zone in this account is handled
 // automatically; a domain hosted anywhere else needs `dns: false` plus a cert
-// you validated by hand. enclavecore.app is registered but has no hosted zone
-// in this account yet, so it stays commented out — turning it on before DNS is
-// ready fails the deploy at certificate validation.
+// you validated by hand.
+//
+// enclavecore.app is registered at Vercel but delegated to Route 53 zone
+// Z05132714ZL2SHERUCOL via Vercel's custom-nameserver setting (2026-09-20).
+// Apex only — www is not registered here and will not resolve.
 const siteDomains: Record<string, string> = {
-  // production: "enclavecore.app",
+  production: "enclavecore.app",
 };
 
 // Browser origins allowed to reach the presigned S3 URLs. The API is same-origin

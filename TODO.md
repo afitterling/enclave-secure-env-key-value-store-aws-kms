@@ -120,38 +120,14 @@ route, endpoint or UI, and the landing footer advertises "invite-only".
 - [ ] **Reconfigure CLI installs.** API routes moved under `/api` on both
       stages. `enclave configure --api-url` now takes the `ApiUrl` output
       (`<SiteUrl>/api`), not the execute-api URL.
-- [ ] **enclavecore.app: finish the delegation.** Route 53 public hosted zone
-      created 2026-09-20, `Z05132714ZL2SHERUCOL`.
-
-      Diagnosed 2026-09-20: this is NOT propagation lag. The `.app` registry
-      itself still returns `ns1.vercel-dns.com` / `ns2.vercel-dns.com`, so the
-      change was never saved. The domain is registered **at Vercel**, under the
-      team "Alex Fitterling's projects"
-      (`team_1fRqUIndZfyYON3mDWbdxVhr`), and its record has no
-      `customNameservers` field at all — unlike finwise.social, tallyloop.app,
-      worldteamclock.app, lucernapdf.app, purchaselist.app, sohalearn.com and
-      nutritionwithlove.app, which all carry an AWS `customNameservers` array.
-
-      Fix it in the Vercel dashboard: the domain's Custom Nameservers setting,
-      same place as the other seven. The Vercel API integration available here
-      exposes no tool for that field. Set these four:
-
-          ns-356.awsdns-44.com
-          ns-618.awsdns-13.net
-          ns-1261.awsdns-29.org
-          ns-1680.awsdns-18.co.uk
-
-      Note this takes the domain off Vercel. Before the switch it served A
-      records at the apex (216.150.16.129, 216.150.16.1) and at www
-      (216.150.16.65, 216.150.1.129). There were no MX and no TXT records, so
-      no mail or domain-verification records are at risk.
-- [ ] **Then enable the domain.** Once `dig NS enclavecore.app` returns the AWS
-      nameservers, uncomment `siteDomains.production` in `infra/sst.config.ts`
-      and redeploy. SST creates the ACM certificate and the validation records
-      in the zone. Doing it before delegation propagates hangs the deploy on
-      certificate validation. The CORS origin list already names both the
-      CloudFront domain and the custom one, so uploads keep working across the
-      cutover.
+- [x] **enclavecore.app is live.** Done 2026-09-20. Delegated from Vercel's
+      custom-nameserver setting to Route 53 zone `Z05132714ZL2SHERUCOL`, ACM
+      certificate issued and validated, apex aliased to the CloudFront
+      distribution. Verified: `https://enclavecore.app` returns 200 with a valid
+      certificate, and `https://enclavecore.app/api` reaches the Lambdas.
+- [ ] **Decide about www.** `www.enclavecore.app` does not resolve. Only the
+      apex is registered in `siteDomains`. If it is wanted, SST's domain config
+      takes a `redirects` list.
 - [ ] **Harden the support route at build time**, not afterwards: honeypot,
       per-IP and per-IP-plus-email limits, server-side rejection of
       `[\r\n,;<>]` in the address, `sha256(token)` only, 24h epoch-second TTL,
