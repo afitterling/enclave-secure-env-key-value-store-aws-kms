@@ -1,7 +1,9 @@
 # infra
 infra/node_modules/
-infra/.sst/
 infra/sst-env.d.ts
+
+# SST state (pulumi state, stack outputs, secrets) — never commit, any depth
+.sst/
 
 # web
 web/node_modules/
