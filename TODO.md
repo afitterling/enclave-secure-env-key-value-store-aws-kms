@@ -120,12 +120,27 @@ route, endpoint or UI, and the landing footer advertises "invite-only".
 - [ ] **Reconfigure CLI installs.** API routes moved under `/api` on both
       stages. `enclave configure --api-url` now takes the `ApiUrl` output
       (`<SiteUrl>/api`), not the execute-api URL.
-- [ ] **enclavecore.app is not usable yet.** The domain is registered but has no
-      Route 53 hosted zone in account 327261196437, so `siteDomains.production`
-      stays commented out. Turning it on before DNS resolves fails the deploy at
-      ACM certificate validation. Once the zone exists (or a manual cert plus
-      `dns: false` is wired up), uncomment it and redeploy; the CORS origin list
-      already contains both the CloudFront domain and the custom one.
+- [ ] **enclavecore.app: finish the delegation.** Route 53 public hosted zone
+      created 2026-09-20, `Z05132714ZL2SHERUCOL`. The registrar still delegates
+      to `ns1.vercel-dns.com` / `ns2.vercel-dns.com`, so the zone is not
+      authoritative yet. Set these four NS records at the registrar:
+
+          ns-356.awsdns-44.com
+          ns-618.awsdns-13.net
+          ns-1261.awsdns-29.org
+          ns-1680.awsdns-18.co.uk
+
+      Note this takes the domain off Vercel. Before the switch it served A
+      records at the apex (216.150.16.129, 216.150.16.1) and at www
+      (216.150.16.65, 216.150.1.129). There were no MX and no TXT records, so
+      no mail or domain-verification records are at risk.
+- [ ] **Then enable the domain.** Once `dig NS enclavecore.app` returns the AWS
+      nameservers, uncomment `siteDomains.production` in `infra/sst.config.ts`
+      and redeploy. SST creates the ACM certificate and the validation records
+      in the zone. Doing it before delegation propagates hangs the deploy on
+      certificate validation. The CORS origin list already names both the
+      CloudFront domain and the custom one, so uploads keep working across the
+      cutover.
 - [ ] **Harden the support route at build time**, not afterwards: honeypot,
       per-IP and per-IP-plus-email limits, server-side rejection of
       `[\r\n,;<>]` in the address, `sha256(token)` only, 24h epoch-second TTL,
