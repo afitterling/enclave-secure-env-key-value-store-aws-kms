@@ -1,0 +1,112 @@
+# TODO
+
+NFR gaps found 2026-09-20 auditing the public web surface against
+`/Users/alex/dev/2026/NFR-and-Repetitive-Specs`. PAGE-002 and PAGE-003 are
+**Proposed**, not Adopted, so these are followed unless you decide otherwise.
+
+## Support page (PAGE-003) — absent entirely
+
+- [ ] Add a `/support` route. Nothing exists today: no route, no form, no endpoint.
+- [ ] Four addressable states: form (`GET /support`), parked (`POST /support`),
+      inert confirm (`GET` renders a button, only `POST /support/confirm` relays),
+      sent.
+- [ ] `GET /support/confirm` must mutate nothing. A relaying GET is silently
+      defeated by corporate link scanners that auto-fetch inbound mail.
+- [ ] Confirm mail from `no-reply@sp33c.tech`; relay to `info@sp33c.tech` with
+      `Reply-To` set to the submitter.
+- [ ] Rate limit `POST /support` by IP and IP+email; honeypot field; reject
+      `[\r\n,;<>]` in the address server-side before it reaches SES.
+- [ ] Store only `sha256(token)` with a 24h epoch-second TTL, consumed atomically
+      and once, constant-time compare, one generic failure message.
+- [ ] Identical copy, status and timing for known and unknown addresses (SEC-005).
+
+## Imprint (PAGE-002) — content is there, the route is not
+
+- [ ] Serve the imprint at a stable `/imprint` path. It is currently only an
+      anchor section (`#imprint`) on the landing page, and the router's catch-all
+      redirects `/imprint` to `/`.
+- [ ] `/impressum` must resolve to the same content, never 404.
+- [ ] Reachable when the landing page is off. `flags.landing = false` makes `/`
+      the login page, and the imprint becomes unreachable.
+- [ ] Add the second means of direct contact required by §8. Only email is
+      listed today. The `/support` form satisfies this, so the two are coupled.
+- [ ] Add the §36 VSBG consumer dispute-resolution statement if selling to consumers.
+- [ ] Single exported `IMPRINT_URL` / `SUPPORT_URL` / `PRIVACY_URL` constant
+      feeding footer and any store metadata, rather than inline hrefs.
+- [ ] Privacy and imprint must be separate pages that link each other. Privacy is
+      currently an outbound link to `sp33c.tech/datenschutz.html` only.
+
+## Privacy page (PAGE-001) — no route, only an outbound link
+
+- [ ] Serve a `/privacy` route. There is none. The landing imprint block links out
+      to `sp33c.tech/datenschutz.html` instead (`web/src/pages/LandingPage.tsx:262`).
+- [ ] Content must match the shipped system: controller, what is collected and why,
+      lawful basis, retention, processors, user rights, tracking posture.
+- [ ] Retention statement must match the real TTLs. The OTP table expires rows at
+      600s via `expiresAt` (`infra/sst.config.ts:88`,
+      `infra/functions/auth/request.ts:10`). The AccessTable has no TTL.
+- [ ] Visible "last updated" date that changes with the copy.
+- [ ] Name a working way to exercise erasure, access and export. Route these
+      through `/support` rather than adding a second public write endpoint.
+- [ ] Link privacy and imprint to each other as siblings.
+
+## Google Fonts is a third-party call before any consent (PAGE-001 §16) — DONE
+
+- [x] Removed the `fonts.googleapis.com` / `fonts.gstatic.com` links from
+      `web/index.html` and imported the same faces and weights from
+      `@fontsource/ibm-plex-sans` and `@fontsource/ibm-plex-mono` in
+      `web/src/main.tsx`. Verified: `npm run build` emits the woff2 files locally
+      and `grep` finds no Google host anywhere in `dist/`.
+
+## Footer is not unified (UI-008)
+
+- [ ] The footer exists only on the landing page
+      (`web/src/pages/LandingPage.tsx:272`). The login page and the whole
+      signed-in shell (`web/src/App.tsx:23-48`) render no footer at all.
+- [ ] It must carry imprint, privacy and support links on every page, as real
+      links, reachable signed-out.
+
+## Page metadata (SEO-003)
+
+- [ ] `web/index.html:6` has one static title and no description, canonical URL,
+      or social card tags. An SPA needs per-route metadata once `/imprint`,
+      `/privacy` and `/support` exist.
+
+## SEO baseline (SEO-001, SEO-002) — no static assets at all
+
+- [ ] No `web/public/` directory, so no `robots.txt` and no `sitemap.xml`.
+- [ ] Keep indexing posture consistent once `/imprint` and `/support` exist, and
+      do not `Disallow` the imprint. Non-production stages must be `noindex`.
+
+## Signup — absent by design, needs a product decision
+
+The app is invite-only. `infra/functions/auth/request.ts` mails a code only when
+`isKnownUser()` passes, which covers bootstrap admins in `adminEmails` plus
+anyone already holding a project or team membership. There is no registration
+route, endpoint or UI, and the landing footer advertises "invite-only".
+
+- [ ] Decide whether self-service signup is actually wanted. It is not a
+      regression to fix, it is a change of posture, and it interacts with the
+      enumeration-resistant generic login response (SEC-005) and with who is
+      allowed to create the first project.
+
+## Hardening decisions (agreed 2026-09-20)
+
+- [x] **Lock CORS before production.** Done. `infra/sst.config.ts` now takes
+      browser origins from a per-stage `webOrigins` map, used by both the API and
+      the vault bucket. `dev` stays wildcard. A production deploy with no origin
+      configured refuses to run unless bootstrapped with
+      `ENCLAVE_BOOTSTRAP_CORS=1`, which exists only because the CloudFront domain
+      does not exist before the first deploy. Fill in `webOrigins.production` and
+      redeploy without the variable.
+- [ ] **Edge rate limiting.** Blocked on an architecture decision, see below.
+      AWS WAF cannot attach to an API Gateway *HTTP* API (v2), only to a REST API
+      or a CloudFront distribution. The cost-bearing endpoints (SES, KMS,
+      DynamoDB, and any future support form) all sit on the HTTP API, so a Web
+      ACL on the site distribution alone would protect static assets and nothing
+      that actually costs money.
+- [ ] **Harden the support route at build time**, not afterwards: honeypot,
+      per-IP and per-IP-plus-email limits, server-side rejection of
+      `[\r\n,;<>]` in the address, `sha256(token)` only, 24h epoch-second TTL,
+      atomic single-use consumption, constant-time compare, one generic failure
+      message. Tracked in the support section above.

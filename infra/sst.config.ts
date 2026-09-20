@@ -29,6 +29,34 @@ const adminEmails = ["info@sp33c.tech"];
 // account). A domain identity covers any address at that domain.
 const sesIdentity = "sp33c.tech";
 
+// Browser origins allowed to call the API and the presigned S3 URLs.
+//
+// Chicken-and-egg: the CloudFront domain only exists after the first deploy, so
+// a brand-new stage has nothing to name here. Bootstrap it with
+// `ENCLAVE_BOOTSTRAP_CORS=1 npx sst deploy --stage production`, read SiteUrl
+// from the output, add it below, and deploy again without the variable.
+//
+// A stage not listed here falls back to "*", which is fine for a throwaway
+// stack and not fine for production — hence the throw.
+const webOrigins: Record<string, string[]> = {
+  // dev is a scratch stack; leave it open so local builds can hit it.
+  dev: ["*"],
+  // production: ["https://dXXXXXXXXXXXXX.cloudfront.net"],
+};
+
+function allowedOrigins(stage: string): string[] {
+  const configured = webOrigins[stage];
+  if (configured?.length) return configured;
+  if (stage === "production" && process.env.ENCLAVE_BOOTSTRAP_CORS !== "1") {
+    throw new Error(
+      "Refusing to deploy production with wildcard CORS. Add the site origin to " +
+        "`webOrigins.production` in infra/sst.config.ts, or bootstrap the first " +
+        "deploy with ENCLAVE_BOOTSTRAP_CORS=1 and then fill it in.",
+    );
+  }
+  return ["*"];
+}
+
 // Edition: "opensource" is the core (projects, encrypted upload/view, CLI);
 // "enterprise" adds team management. Editions are presets over the feature
 // toggles below — individual flags can still be overridden after the spread.
@@ -64,6 +92,7 @@ export default $config({
     const identity = await aws.getCallerIdentity({});
     const region = await aws.getRegion({});
     const accountId = identity.accountId;
+    const origins = allowedOrigins($app.stage);
 
     // Address that one-time-code emails are sent FROM. Must be a verified SES
     // identity in this account/region. Set via: `npx sst secret set SesSender ...`
@@ -143,7 +172,7 @@ export default $config({
       // cross-origin PUT/GET/DELETE fails preflight (the CLI is unaffected).
       cors: {
         allowMethods: ["GET", "PUT", "DELETE"],
-        allowOrigins: ["*"],
+        allowOrigins: origins,
         allowHeaders: ["*"],
       },
       transform: {
@@ -184,7 +213,7 @@ export default $config({
     // rate-based rule keyed on IP is a recommended additional layer.
     const api = new sst.aws.ApiGatewayV2("Api", {
       cors: {
-        allowOrigins: ["*"],
+        allowOrigins: origins,
         allowMethods: ["GET", "POST"],
         allowHeaders: ["authorization", "content-type"],
       },
