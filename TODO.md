@@ -121,9 +121,20 @@ route, endpoint or UI, and the landing footer advertises "invite-only".
       stages. `enclave configure --api-url` now takes the `ApiUrl` output
       (`<SiteUrl>/api`), not the execute-api URL.
 - [ ] **enclavecore.app: finish the delegation.** Route 53 public hosted zone
-      created 2026-09-20, `Z05132714ZL2SHERUCOL`. The registrar still delegates
-      to `ns1.vercel-dns.com` / `ns2.vercel-dns.com`, so the zone is not
-      authoritative yet. Set these four NS records at the registrar:
+      created 2026-09-20, `Z05132714ZL2SHERUCOL`.
+
+      Diagnosed 2026-09-20: this is NOT propagation lag. The `.app` registry
+      itself still returns `ns1.vercel-dns.com` / `ns2.vercel-dns.com`, so the
+      change was never saved. The domain is registered **at Vercel**, under the
+      team "Alex Fitterling's projects"
+      (`team_1fRqUIndZfyYON3mDWbdxVhr`), and its record has no
+      `customNameservers` field at all — unlike finwise.social, tallyloop.app,
+      worldteamclock.app, lucernapdf.app, purchaselist.app, sohalearn.com and
+      nutritionwithlove.app, which all carry an AWS `customNameservers` array.
+
+      Fix it in the Vercel dashboard: the domain's Custom Nameservers setting,
+      same place as the other seven. The Vercel API integration available here
+      exposes no tool for that field. Set these four:
 
           ns-356.awsdns-44.com
           ns-618.awsdns-13.net
