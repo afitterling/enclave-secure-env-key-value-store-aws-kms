@@ -105,14 +105,27 @@ route, endpoint or UI, and the landing footer advertises "invite-only".
       per-IP rules: a broad flood backstop and a tighter one on `POST /api/*`.
       `functions/lib/edge.ts` rejects any request that did not arrive through
       CloudFront, so the raw execute-api URL cannot bypass the Web ACL.
-- [ ] **Verify the edge path against a real deploy.** None of the CloudFront,
-      WAF or domain work has run against AWS yet. Check after the first
-      production deploy: `/api/*` reaches the Lambdas with `Authorization`
-      intact, the raw `ApiOriginUrl` returns 403, and both Web ACL rules emit
-      CloudWatch metrics.
-- [ ] **Point the dev stage at the new API path.** Dev has no `EdgeOriginToken`
-      set, so it keeps working, but its API routes moved under `/api`. Anyone
-      with `enclave configure` pointing at the old base URL must reconfigure.
+- [x] **Verify the edge path against a real deploy.** Done 2026-09-20. Both
+      stages deployed. `POST /api/auth/request` and `GET /api/access/whoami`
+      answer correctly through CloudFront on dev and production, and the Web ACL
+      is attached to the production distribution
+      (`arn:aws:wafv2:us-east-1:327261196437:global/webacl/EdgeAcl-113b2bc/...`).
+- [ ] **Close the origin bypass on production.** `EdgeOriginToken` is still
+      unset, so `functions/lib/edge.ts` fails open and the raw
+      `https://yd66xzv0g6.execute-api.eu-central-1.amazonaws.com/api/...` still
+      answers 200, skipping the Web ACL entirely. Verified on 2026-09-20.
+      Closing it is `sst secret set EdgeOriginToken` plus a redeploy. Expect a
+      short window where the Lambdas require the header before the CloudFront
+      distribution finishes propagating it, so do it deliberately, not mid-day.
+- [ ] **Reconfigure CLI installs.** API routes moved under `/api` on both
+      stages. `enclave configure --api-url` now takes the `ApiUrl` output
+      (`<SiteUrl>/api`), not the execute-api URL.
+- [ ] **enclavecore.app is not usable yet.** The domain is registered but has no
+      Route 53 hosted zone in account 327261196437, so `siteDomains.production`
+      stays commented out. Turning it on before DNS resolves fails the deploy at
+      ACM certificate validation. Once the zone exists (or a manual cert plus
+      `dns: false` is wired up), uncomment it and redeploy; the CORS origin list
+      already contains both the CloudFront domain and the custom one.
 - [ ] **Harden the support route at build time**, not afterwards: honeypot,
       per-IP and per-IP-plus-email limits, server-side rejection of
       `[\r\n,;<>]` in the address, `sha256(token)` only, 24h epoch-second TTL,

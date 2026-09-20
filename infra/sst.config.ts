@@ -30,27 +30,41 @@ const adminEmails = ["info@sp33c.tech"];
 const sesIdentity = "sp33c.tech";
 
 // Custom domain per deployment stage. A stage with no entry runs on the
-// CloudFront default domain. DNS must be reachable to SST: Route 53 is managed
-// automatically, anything else needs the records added by hand.
+// CloudFront default domain.
+//
+// PREREQUISITE, and the deploy fails without it: SST has to be able to write
+// the ACM validation records. A Route 53 hosted zone in this account is handled
+// automatically; a domain hosted anywhere else needs `dns: false` plus a cert
+// you validated by hand. enclavecore.app is registered but has no hosted zone
+// in this account yet, so it stays commented out — turning it on before DNS is
+// ready fails the deploy at certificate validation.
 const siteDomains: Record<string, string> = {
-  production: "enclavecore.app",
+  // production: "enclavecore.app",
 };
 
-// Browser origins allowed to reach the presigned S3 URLs. The API itself is
-// same-origin now (served at /api on the site distribution), so this really
-// only governs the bucket, where the browser PUTs and GETs directly.
+// Browser origins allowed to reach the presigned S3 URLs. The API is same-origin
+// now (served at /api on the site distribution), so this really only governs the
+// bucket, where the browser PUTs and GETs directly.
 //
-// A stage with a domain gets exactly that origin. A stage without one falls
-// back to "*", which is fine for a scratch stack — but production must never
-// land there, hence the throw.
+// Deliberately NOT derived from `siteDomains`: during a domain cutover the site
+// answers on both the CloudFront default domain and the custom one, and an
+// origin list naming only the new domain breaks uploads on the live site. List
+// every origin the app is actually served from.
+const webOrigins: Record<string, string[]> = {
+  production: [
+    "https://d2lessbpccmuy9.cloudfront.net", // current production distribution
+    "https://enclavecore.app", // harmless before cutover, required after
+  ],
+};
+
 function allowedOrigins(stage: string): string[] {
-  const domain = siteDomains[stage];
-  if (domain) return [`https://${domain}`];
+  const configured = webOrigins[stage];
+  if (configured?.length) return configured;
   if (stage === "production") {
     throw new Error(
-      "Refusing to deploy production without a site domain. Add one to " +
-        "`siteDomains` in infra/sst.config.ts — production must not run with " +
-        "wildcard CORS on the vault bucket.",
+      "Refusing to deploy production with wildcard CORS on the vault bucket. " +
+        "Add every origin the site is served from to `webOrigins.production` " +
+        "in infra/sst.config.ts.",
     );
   }
   return ["*"];
@@ -399,7 +413,9 @@ export default $config({
                               searchString: "POST",
                               positionalConstraint: "EXACTLY",
                               fieldToMatch: { method: {} },
-                              textTransformations: [{ priority: 0, type: "UPPERCASE" }],
+                              // WAF has no UPPERCASE transform, and the HTTP
+                              // method already arrives uppercase.
+                              textTransformations: [{ priority: 0, type: "NONE" }],
                             },
                           },
                         ],
@@ -441,15 +457,26 @@ export default $config({
       },
       transform: {
         cdn: (args) => {
-          args.origins = $output(args.origins).apply((origins) => [
+          args.origins = $output({
+            origins: args.origins,
+            host: apiHost,
+            token: edgeToken.value,
+          }).apply(({ origins, host, token }) => [
             ...origins,
             {
               originId: "api",
-              domainName: apiHost,
+              domainName: host,
               // Proves the request came through CloudFront. The Lambdas reject
               // anything without it, so the execute-api URL cannot be used to
               // walk around the Web ACL.
-              customHeaders: [{ name: "x-edge-origin-token", value: edgeToken.value }],
+              //
+              // The name must not start with `x-edge-` or `x-amz-cf-`:
+              // CloudFront reserves both prefixes and rejects the distribution
+              // update with "The parameter HeaderName ... is not allowed".
+              //
+              // Omitted entirely when no token is set, which is how a stage
+              // runs with the check disabled.
+              ...(token ? { customHeaders: [{ name: "x-enclave-origin", value: token }] } : {}),
               customOriginConfig: {
                 originProtocolPolicy: "https-only",
                 httpPort: 80,

@@ -20,8 +20,9 @@ export function edgeRejection(event: {
   const expected = process.env.EDGE_ORIGIN_TOKEN;
   if (!expected) return null; // not enforced on this stage
 
-  // API Gateway v2 lowercases header names.
-  const presented = event.headers?.["x-edge-origin-token"];
+  // API Gateway v2 lowercases header names. The name avoids CloudFront's
+  // reserved `x-edge-` and `x-amz-cf-` prefixes, which it refuses to send.
+  const presented = event.headers?.["x-enclave-origin"];
   if (!presented) return forbidden();
 
   const a = Buffer.from(presented);
