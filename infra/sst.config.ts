@@ -50,9 +50,12 @@ export default $config({
   app(input) {
     return {
       name: "enclave-envoy",
-      // Keep encrypted data and the KMS key around if you tear down prod by mistake.
-      removal: input?.stage === "prod" ? "retain" : "remove",
-      protect: input?.stage === "prod",
+      // Keep encrypted data and the KMS key around if you tear down production
+      // by mistake. NB: this is the *deployment* stage name ("production"), not
+      // the vault stage "prod" in `stages` above — renaming one does not rename
+      // the other, and getting it wrong silently disables both guards.
+      removal: input?.stage === "production" ? "retain" : "remove",
+      protect: input?.stage === "production",
       home: "aws",
     };
   },
