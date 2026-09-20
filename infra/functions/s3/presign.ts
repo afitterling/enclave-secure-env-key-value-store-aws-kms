@@ -11,6 +11,7 @@ import { featureEnabled } from "../lib/features.js";
 import { s3ForStage } from "../lib/assume.js";
 import { requireAuth } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, parseBody } from "../lib/response.js";
+import { edgeRejection } from "../lib/edge.js";
 
 /**
  * Brokers S3 access for the CLI and web UI. Validates the user against the
@@ -33,6 +34,10 @@ interface Body {
 const safeName = (name: string) => /^[\w.@+-]+$/.test(name);
 
 export async function handler(event: APIGatewayProxyEventV2) {
+  // Reject anything that did not come through CloudFront (see lib/edge.ts).
+  const blocked = edgeRejection(event);
+  if (blocked) return blocked;
+
   let email: string;
   try {
     email = requireAuth(event, process.env.JWT_SIGNING_KEY!).sub;

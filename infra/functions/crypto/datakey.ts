@@ -3,6 +3,7 @@ import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { canAccess } from "../lib/access.js";
 import { requireAuth } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, parseBody } from "../lib/response.js";
+import { edgeRejection } from "../lib/edge.js";
 
 /**
  * Envelope-encryption broker. The master key never leaves KMS.
@@ -33,6 +34,10 @@ const safeName = (name: unknown): name is string =>
   typeof name === "string" && /^[\w.@+-]+$/.test(name);
 
 export async function handler(event: APIGatewayProxyEventV2) {
+  // Reject anything that did not come through CloudFront (see lib/edge.ts).
+  const blocked = edgeRejection(event);
+  if (blocked) return blocked;
+
   let email: string;
   try {
     email = requireAuth(event, process.env.JWT_SIGNING_KEY!).sub;

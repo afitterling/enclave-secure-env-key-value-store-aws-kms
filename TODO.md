@@ -99,12 +99,20 @@ route, endpoint or UI, and the landing footer advertises "invite-only".
       `ENCLAVE_BOOTSTRAP_CORS=1`, which exists only because the CloudFront domain
       does not exist before the first deploy. Fill in `webOrigins.production` and
       redeploy without the variable.
-- [ ] **Edge rate limiting.** Blocked on an architecture decision, see below.
-      AWS WAF cannot attach to an API Gateway *HTTP* API (v2), only to a REST API
-      or a CloudFront distribution. The cost-bearing endpoints (SES, KMS,
-      DynamoDB, and any future support form) all sit on the HTTP API, so a Web
-      ACL on the site distribution alone would protect static assets and nothing
-      that actually costs money.
+- [x] **Edge rate limiting.** Done in code, not yet deployed. The API is now an
+      origin on the site CloudFront distribution under `/api`, so a
+      CloudFront-scoped Web ACL (us-east-1, production only) can see it. Two
+      per-IP rules: a broad flood backstop and a tighter one on `POST /api/*`.
+      `functions/lib/edge.ts` rejects any request that did not arrive through
+      CloudFront, so the raw execute-api URL cannot bypass the Web ACL.
+- [ ] **Verify the edge path against a real deploy.** None of the CloudFront,
+      WAF or domain work has run against AWS yet. Check after the first
+      production deploy: `/api/*` reaches the Lambdas with `Authorization`
+      intact, the raw `ApiOriginUrl` returns 403, and both Web ACL rules emit
+      CloudWatch metrics.
+- [ ] **Point the dev stage at the new API path.** Dev has no `EdgeOriginToken`
+      set, so it keeps working, but its API routes moved under `/api`. Anyone
+      with `enclave configure` pointing at the old base URL must reconfigure.
 - [ ] **Harden the support route at build time**, not afterwards: honeypot,
       per-IP and per-IP-plus-email limits, server-side rejection of
       `[\r\n,;<>]` in the address, `sha256(token)` only, 24h epoch-second TTL,

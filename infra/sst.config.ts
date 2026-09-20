@@ -29,29 +29,28 @@ const adminEmails = ["info@sp33c.tech"];
 // account). A domain identity covers any address at that domain.
 const sesIdentity = "sp33c.tech";
 
-// Browser origins allowed to call the API and the presigned S3 URLs.
-//
-// Chicken-and-egg: the CloudFront domain only exists after the first deploy, so
-// a brand-new stage has nothing to name here. Bootstrap it with
-// `ENCLAVE_BOOTSTRAP_CORS=1 npx sst deploy --stage production`, read SiteUrl
-// from the output, add it below, and deploy again without the variable.
-//
-// A stage not listed here falls back to "*", which is fine for a throwaway
-// stack and not fine for production — hence the throw.
-const webOrigins: Record<string, string[]> = {
-  // dev is a scratch stack; leave it open so local builds can hit it.
-  dev: ["*"],
-  // production: ["https://dXXXXXXXXXXXXX.cloudfront.net"],
+// Custom domain per deployment stage. A stage with no entry runs on the
+// CloudFront default domain. DNS must be reachable to SST: Route 53 is managed
+// automatically, anything else needs the records added by hand.
+const siteDomains: Record<string, string> = {
+  production: "enclavecore.app",
 };
 
+// Browser origins allowed to reach the presigned S3 URLs. The API itself is
+// same-origin now (served at /api on the site distribution), so this really
+// only governs the bucket, where the browser PUTs and GETs directly.
+//
+// A stage with a domain gets exactly that origin. A stage without one falls
+// back to "*", which is fine for a scratch stack — but production must never
+// land there, hence the throw.
 function allowedOrigins(stage: string): string[] {
-  const configured = webOrigins[stage];
-  if (configured?.length) return configured;
-  if (stage === "production" && process.env.ENCLAVE_BOOTSTRAP_CORS !== "1") {
+  const domain = siteDomains[stage];
+  if (domain) return [`https://${domain}`];
+  if (stage === "production") {
     throw new Error(
-      "Refusing to deploy production with wildcard CORS. Add the site origin to " +
-        "`webOrigins.production` in infra/sst.config.ts, or bootstrap the first " +
-        "deploy with ENCLAVE_BOOTSTRAP_CORS=1 and then fill it in.",
+      "Refusing to deploy production without a site domain. Add one to " +
+        "`siteDomains` in infra/sst.config.ts — production must not run with " +
+        "wildcard CORS on the vault bucket.",
     );
   }
   return ["*"];
@@ -93,6 +92,8 @@ export default $config({
     const region = await aws.getRegion({});
     const accountId = identity.accountId;
     const origins = allowedOrigins($app.stage);
+    const siteDomain = siteDomains[$app.stage];
+    const isProduction = $app.stage === "production";
 
     // Address that one-time-code emails are sent FROM. Must be a verified SES
     // identity in this account/region. Set via: `npx sst secret set SesSender ...`
@@ -107,6 +108,13 @@ export default $config({
     // assume a stage role, so an unrelated in-account principal that merely
     // holds sts:AssumeRole cannot. `npx sst secret set StageAssumeExternalId ...`
     const assumeExternalId = new sst.Secret("StageAssumeExternalId");
+
+    // Shared secret CloudFront injects as a request header on the /api origin.
+    // The Lambdas reject requests that lack it, so the raw execute-api URL
+    // cannot be used to bypass the edge WAF. Unset means "not enforced", which
+    // keeps existing stages working until the token is set on them:
+    // `npx sst secret set EdgeOriginToken "$(openssl rand -hex 32)" --stage <s>`
+    const edgeToken = new sst.Secret("EdgeOriginToken", "");
 
     // ---- KMS master key ---------------------------------------------------
     const key = new aws.kms.Key("EnclaveMasterKey", {
@@ -235,6 +243,7 @@ export default $config({
       ACCESS_TABLE: accessTable.name,
       FEATURES: JSON.stringify(features),
       EDITION: edition,
+      EDGE_ORIGIN_TOKEN: edgeToken.value,
     };
 
     // Read-only access-map lookups (canAccess / permissionsFor / isKnownUser).
@@ -243,7 +252,7 @@ export default $config({
       resources: [accessTable.arn, $interpolate`${accessTable.arn}/index/*`],
     };
 
-    api.route("POST /auth/request", {
+    api.route("POST /api/auth/request", {
       handler: "functions/auth/request.handler",
       environment: {
         ...baseEnv,
@@ -268,7 +277,7 @@ export default $config({
       ],
     });
 
-    api.route("POST /auth/verify", {
+    api.route("POST /api/auth/verify", {
       handler: "functions/auth/verify.handler",
       environment: { ...baseEnv, OTP_TABLE: otpTable.name },
       permissions: [
@@ -280,13 +289,13 @@ export default $config({
       ],
     });
 
-    api.route("GET /access/whoami", {
+    api.route("GET /api/access/whoami", {
       handler: "functions/access/whoami.handler",
       environment: baseEnv,
       permissions: [accessRead],
     });
 
-    api.route("POST /crypto/datakey", {
+    api.route("POST /api/crypto/datakey", {
       handler: "functions/crypto/datakey.handler",
       environment: { ...baseEnv, KMS_KEY_ID: key.keyId },
       permissions: [
@@ -295,7 +304,7 @@ export default $config({
       ],
     });
 
-    api.route("POST /s3/presign", {
+    api.route("POST /api/s3/presign", {
       handler: "functions/s3/presign.handler",
       environment: {
         ...baseEnv,
@@ -330,22 +339,165 @@ export default $config({
         },
       ],
     };
-    api.route("GET /admin/{proxy+}", adminDef);
-    api.route("POST /admin/{proxy+}", adminDef);
+    api.route("GET /api/admin/{proxy+}", adminDef);
+    api.route("POST /api/admin/{proxy+}", adminDef);
 
-    // ---- Web frontend (static SPA; VITE_API_URL baked at build time) ------
+    // ---- Edge WAF ---------------------------------------------------------
+    // A CloudFront-scoped Web ACL has to live in us-east-1 whatever the origin
+    // region, so it needs its own provider. Production only: a Web ACL bills
+    // per month plus per request, and scratch stages are not worth it.
+    const edgeAcl = isProduction
+      ? new aws.wafv2.WebAcl(
+          "EdgeAcl",
+          {
+            scope: "CLOUDFRONT",
+            defaultAction: { allow: {} },
+            visibilityConfig: {
+              cloudwatchMetricsEnabled: true,
+              metricName: `enclave-envoy-${$app.stage}-edge`,
+              sampledRequestsEnabled: true,
+            },
+            rules: [
+              {
+                // Broad backstop against L7 floods and cache-busting.
+                name: "PerIpFlood",
+                priority: 0,
+                action: { block: {} },
+                statement: {
+                  rateBasedStatement: { limit: 2000, aggregateKeyType: "IP" },
+                },
+                visibilityConfig: {
+                  cloudwatchMetricsEnabled: true,
+                  metricName: `enclave-envoy-${$app.stage}-flood`,
+                  sampledRequestsEnabled: true,
+                },
+              },
+              {
+                // Tighter cap on the cost-bearing path. Every POST under /api
+                // can spend SES, KMS and DynamoDB, so it gets its own budget
+                // well below the broad limit.
+                name: "PerIpApiWrites",
+                priority: 1,
+                action: { block: {} },
+                statement: {
+                  rateBasedStatement: {
+                    limit: 100,
+                    aggregateKeyType: "IP",
+                    scopeDownStatement: {
+                      andStatement: {
+                        statements: [
+                          {
+                            byteMatchStatement: {
+                              searchString: "/api/",
+                              positionalConstraint: "STARTS_WITH",
+                              fieldToMatch: { uriPath: {} },
+                              textTransformations: [{ priority: 0, type: "LOWERCASE" }],
+                            },
+                          },
+                          {
+                            byteMatchStatement: {
+                              searchString: "POST",
+                              positionalConstraint: "EXACTLY",
+                              fieldToMatch: { method: {} },
+                              textTransformations: [{ priority: 0, type: "UPPERCASE" }],
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+                visibilityConfig: {
+                  cloudwatchMetricsEnabled: true,
+                  metricName: `enclave-envoy-${$app.stage}-api-writes`,
+                  sampledRequestsEnabled: true,
+                },
+              },
+            ],
+          },
+          { provider: new aws.Provider("UsEast1", { region: "us-east-1" }) },
+        )
+      : undefined;
+
+    // ---- Web frontend -----------------------------------------------------
+    // The API is served from this same distribution under /api, which is what
+    // makes the WAF above meaningful: AWS WAF cannot attach to an API Gateway
+    // HTTP API directly, only to CloudFront. Being same-origin also means the
+    // browser never makes a cross-origin API call, so API CORS stops mattering.
+    //
+    // VITE_API_URL is the relative "/api" rather than the API's own URL, which
+    // also breaks what would otherwise be a cycle (site needs the API URL, the
+    // distribution needs the API as an origin).
+    const apiHost = api.url.apply((u) => new URL(u).host);
+
     const site = new sst.aws.StaticSite("Web", {
       path: "../web",
       build: { command: "npm run build", output: "dist" },
+      ...(siteDomain ? { domain: siteDomain } : {}),
       environment: {
-        VITE_API_URL: api.url,
+        VITE_API_URL: "/api",
         VITE_FEATURES: JSON.stringify(features),
         VITE_EDITION: edition,
+      },
+      transform: {
+        cdn: (args) => {
+          args.origins = $output(args.origins).apply((origins) => [
+            ...origins,
+            {
+              originId: "api",
+              domainName: apiHost,
+              // Proves the request came through CloudFront. The Lambdas reject
+              // anything without it, so the execute-api URL cannot be used to
+              // walk around the Web ACL.
+              customHeaders: [{ name: "x-edge-origin-token", value: edgeToken.value }],
+              customOriginConfig: {
+                originProtocolPolicy: "https-only",
+                httpPort: 80,
+                httpsPort: 443,
+                originSslProtocols: ["TLSv1.2"],
+              },
+            },
+          ]);
+
+          args.orderedCacheBehaviors = $output(args.orderedCacheBehaviors ?? []).apply(
+            (behaviors) => [
+              ...behaviors,
+              {
+                pathPattern: "/api/*",
+                targetOriginId: "api",
+                viewerProtocolPolicy: "redirect-to-https",
+                allowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+                cachedMethods: ["GET", "HEAD"],
+                compress: true,
+                // Managed "CachingDisabled" — an API response must never be
+                // served from the edge cache to another user.
+                cachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+                // Managed "AllViewerExceptHostHeader" — forwards Authorization
+                // and the body, but keeps the viewer Host off the origin, which
+                // API Gateway rejects.
+                originRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac",
+              },
+            ],
+          );
+
+          if (edgeAcl) {
+            args.transform = {
+              ...args.transform,
+              distribution: (dist) => {
+                dist.webAclId = edgeAcl.arn;
+              },
+            };
+          }
+        },
       },
     });
 
     return {
-      ApiUrl: api.url,
+      // What the CLI should be configured with. Goes through CloudFront, so it
+      // is covered by the Web ACL; the raw api.url below bypasses it and is
+      // rejected once EdgeOriginToken is set.
+      ApiUrl: $interpolate`${site.url}/api`,
+      ApiOriginUrl: api.url,
       SiteUrl: site.url,
       Bucket: bucket.name,
       KmsKeyId: key.keyId,

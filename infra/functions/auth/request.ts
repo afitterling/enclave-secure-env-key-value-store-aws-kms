@@ -5,6 +5,7 @@ import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { isKnownUser, normalizeEmail } from "../lib/access.js";
 import { ok, badRequest, parseBody } from "../lib/response.js";
+import { edgeRejection } from "../lib/edge.js";
 
 const OTP_DIGITS = 6;
 const TTL_SECONDS = 600; // code valid for 10 minutes
@@ -22,6 +23,10 @@ const hashCode = (email: string, code: string) =>
   createHash("sha256").update(`${email}:${code}`).digest("hex");
 
 export async function handler(event: APIGatewayProxyEventV2) {
+  // Reject anything that did not come through CloudFront (see lib/edge.ts).
+  const blocked = edgeRejection(event);
+  if (blocked) return blocked;
+
   const started = Date.now();
   const genericAfterFloor = async () => {
     // Equalize latency so the known vs unknown path can't be timed apart.

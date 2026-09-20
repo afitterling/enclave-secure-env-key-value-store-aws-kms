@@ -12,6 +12,7 @@ import { normalizeEmail, validStages } from "../lib/access.js";
 import { featureEnabled } from "../lib/features.js";
 import { requireAuth } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, json, parseBody } from "../lib/response.js";
+import { edgeRejection } from "../lib/edge.js";
 
 /**
  * Self-service project/team administration. One Lambda, internal router:
@@ -354,6 +355,10 @@ async function removeTeamMember(email: string, team: string, body: Record<string
 // ---- router ----------------------------------------------------------------
 
 export async function handler(event: APIGatewayProxyEventV2) {
+  // Reject anything that did not come through CloudFront (see lib/edge.ts).
+  const blocked = edgeRejection(event);
+  if (blocked) return blocked;
+
   let email: string;
   try {
     email = requireAuth(event, process.env.JWT_SIGNING_KEY!).sub;

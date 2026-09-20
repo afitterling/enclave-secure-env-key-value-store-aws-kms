@@ -108,6 +108,11 @@ Every stage is a fully independent deployment: its own KMS master key, bucket, t
 API, IAM roles and secrets. Nothing is shared with `dev`, and secrets do **not** carry
 over — SST stores them per stage in SSM Parameter Store.
 
+Production runs on the custom domain in `siteDomains` (`infra/sst.config.ts`).
+DNS has to be reachable to SST before the first deploy: a Route 53 hosted zone is
+managed automatically, anything else needs the ACM validation records added by hand,
+and the deploy waits on certificate validation until they resolve.
+
 ```bash
 cd infra
 
@@ -115,14 +120,34 @@ cd infra
 npx sst secret set JwtSigningKey "$(openssl rand -hex 32)" --stage production
 npx sst secret set StageAssumeExternalId "$(openssl rand -hex 16)" --stage production
 npx sst secret set SesSender no-reply@yourdomain.example --stage production
+npx sst secret set EdgeOriginToken "$(openssl rand -hex 32)" --stage production
 
-npx sst secret list --stage production   # expect all three
+npx sst secret list --stage production   # expect all four
 npx sst deploy --stage production
 ```
 
 Then open the printed `SiteUrl`, log in with an address from `adminEmails`, and create a
 project — that first login is what proves SES, KMS and the presign role are all wired up
 on this stage.
+
+### The API is served from the site distribution
+
+`sst deploy` prints two API values and they are not interchangeable:
+
+- **`ApiUrl`** is `<SiteUrl>/api`. This is what `enclave configure --api-url` takes.
+  It goes through CloudFront, so the edge Web ACL sees it.
+- **`ApiOriginUrl`** is the raw API Gateway URL. It bypasses the Web ACL, and once
+  `EdgeOriginToken` is set on the stage every handler rejects it with a 403.
+
+AWS WAF cannot attach to an API Gateway HTTP API, only to CloudFront, which is why
+the API is an origin on the site distribution under `/api` rather than a separate
+public endpoint. The browser therefore calls the API same-origin and never makes a
+cross-origin API request. The bucket still needs CORS, because the browser PUTs and
+GETs presigned S3 URLs directly.
+
+The Web ACL is production-only and carries two per-IP rate limits: a broad flood
+backstop, and a tighter one scoped to `POST /api/*`, the requests that spend SES,
+KMS and DynamoDB.
 
 ### What the `production` stage name changes
 
@@ -159,15 +184,16 @@ deployment creates `alias/enclave-envoy-production` and IAM roles
 
 ### Before you put real secrets in it
 
-- **Lock down CORS.** The API and the bucket both allow `allowOrigins: ["*"]`. That is
-  fine for a dev stack but in production it should be the CloudFront site origin. Deploy
-  once to learn `SiteUrl`, then narrow both and redeploy.
+- **CORS is scoped by stage.** Origins come from `siteDomains` in the config. A stage
+  with a domain allows exactly that origin; a stage without one falls back to `"*"`, and
+  production refuses to deploy without one.
 - **Check the SES identity.** `sesIdentity` in the config is the domain the OTP grant is
   scoped to, and it must be verified **and out of the sandbox** in the same account and
   region, or login mail silently fails for anyone who is not a verified recipient.
-- **Raise the throttle deliberately.** The API carries a stage-wide cap of 20 req/s
-  (burst 40) shared across all users. Add a WAFv2 rate-based rule keyed on IP as the
-  per-client layer rather than just lifting the cap.
+- **The throttle is now two-layered.** The API keeps its stage-wide cap of 20 req/s
+  (burst 40) shared across all callers, and production adds per-IP limits at the edge
+  Web ACL. Tune the Web ACL limits from its CloudWatch metrics rather than lifting the
+  stage cap.
 - **Set `adminEmails` for production.** Bootstrap admins are compiled in, not per-stage.
   If production needs a different set, that is a config change and a redeploy.
 

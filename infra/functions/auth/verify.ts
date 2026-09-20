@@ -5,6 +5,7 @@ import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { normalizeEmail, permissionsFor } from "../lib/access.js";
 import { issue } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, parseBody } from "../lib/response.js";
+import { edgeRejection } from "../lib/edge.js";
 
 const MAX_ATTEMPTS = 5;
 
@@ -16,6 +17,10 @@ const hashCode = (email: string, code: string) =>
   createHash("sha256").update(`${email}:${code}`).digest("hex");
 
 export async function handler(event: APIGatewayProxyEventV2) {
+  // Reject anything that did not come through CloudFront (see lib/edge.ts).
+  const blocked = edgeRejection(event);
+  if (blocked) return blocked;
+
   const { email, code } = parseBody<{ email?: string; code?: string }>(event);
   if (!email || !code) return badRequest("email and code are required");
   const normalized = normalizeEmail(email);
