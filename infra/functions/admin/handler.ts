@@ -367,7 +367,9 @@ export async function handler(event: APIGatewayProxyEventV2) {
   }
 
   const method = event.requestContext.http.method;
-  const parts = event.rawPath.replace(/^\/admin\/?/, "").split("/").filter(Boolean);
+  // Routes are mounted under /api (CloudFront fronts the API so the edge WAF
+  // can see it), so the prefix is optional here rather than assumed absent.
+  const parts = event.rawPath.replace(/^\/(?:api\/)?admin\/?/, "").split("/").filter(Boolean);
   const body = method === "POST" ? parseBody<Record<string, unknown>>(event) : {};
   const [root, id, sub, action] = parts;
 
