@@ -353,82 +353,19 @@ export default $config({
     api.route("POST /api/admin/{proxy+}", adminDef);
 
     // ---- Edge WAF ---------------------------------------------------------
-    // A CloudFront-scoped Web ACL has to live in us-east-1 whatever the origin
-    // region, so it needs its own provider. Production only: a Web ACL bills
-    // per month plus per request, and scratch stages are not worth it.
-    const edgeAcl = isProduction
-      ? new aws.wafv2.WebAcl(
-          "EdgeAcl",
-          {
-            scope: "CLOUDFRONT",
-            defaultAction: { allow: {} },
-            visibilityConfig: {
-              cloudwatchMetricsEnabled: true,
-              metricName: `enclave-envoy-${$app.stage}-edge`,
-              sampledRequestsEnabled: true,
-            },
-            rules: [
-              {
-                // Broad backstop against L7 floods and cache-busting.
-                name: "PerIpFlood",
-                priority: 0,
-                action: { block: {} },
-                statement: {
-                  rateBasedStatement: { limit: 2000, aggregateKeyType: "IP" },
-                },
-                visibilityConfig: {
-                  cloudwatchMetricsEnabled: true,
-                  metricName: `enclave-envoy-${$app.stage}-flood`,
-                  sampledRequestsEnabled: true,
-                },
-              },
-              {
-                // Tighter cap on the cost-bearing path. Every POST under /api
-                // can spend SES, KMS and DynamoDB, so it gets its own budget
-                // well below the broad limit.
-                name: "PerIpApiWrites",
-                priority: 1,
-                action: { block: {} },
-                statement: {
-                  rateBasedStatement: {
-                    limit: 100,
-                    aggregateKeyType: "IP",
-                    scopeDownStatement: {
-                      andStatement: {
-                        statements: [
-                          {
-                            byteMatchStatement: {
-                              searchString: "/api/",
-                              positionalConstraint: "STARTS_WITH",
-                              fieldToMatch: { uriPath: {} },
-                              textTransformations: [{ priority: 0, type: "LOWERCASE" }],
-                            },
-                          },
-                          {
-                            byteMatchStatement: {
-                              searchString: "POST",
-                              positionalConstraint: "EXACTLY",
-                              fieldToMatch: { method: {} },
-                              // WAF has no UPPERCASE transform, and the HTTP
-                              // method already arrives uppercase.
-                              textTransformations: [{ priority: 0, type: "NONE" }],
-                            },
-                          },
-                        ],
-                      },
-                    },
-                  },
-                },
-                visibilityConfig: {
-                  cloudwatchMetricsEnabled: true,
-                  metricName: `enclave-envoy-${$app.stage}-api-writes`,
-                  sampledRequestsEnabled: true,
-                },
-              },
-            ],
-          },
+    // The Web ACL itself is owned by the central `waf-acls` app (AWS-Admin/WAF
+    // (sst), SEC-006) as `EnclaveEdge`: the same per-IP flood backstop (2000 /
+    // 5 min) and the same tighter cap on POST under /api/ (100 / 5 min) this
+    // stack used to define for itself, plus AWS's managed rule groups, request
+    // logging and attack alarms. That app publishes the ARN to SSM; we read it
+    // and bind it to the distribution below. The param lives in us-east-1
+    // whatever the origin region, hence the lookup-only provider. Production
+    // only: a Web ACL bills per month plus per request.
+    const edgeAclArn = isProduction
+      ? aws.ssm.getParameterOutput(
+          { name: "/waf/production/EnclaveEdge" },
           { provider: new aws.Provider("UsEast1", { region: "us-east-1" }) },
-        )
+        ).value
       : undefined;
 
     // ---- Web frontend -----------------------------------------------------
@@ -503,11 +440,11 @@ export default $config({
             ],
           );
 
-          if (edgeAcl) {
+          if (edgeAclArn) {
             args.transform = {
               ...args.transform,
               distribution: (dist) => {
-                dist.webAclId = edgeAcl.arn;
+                dist.webAclId = edgeAclArn;
               },
             };
           }
