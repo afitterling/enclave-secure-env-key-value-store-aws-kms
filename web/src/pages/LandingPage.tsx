@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { edition } from "../lib/flags";
+import { edition, flags } from "../lib/flags";
 
 const CLI_QUICKSTART = `# install the CLI
 pip install -e cli/
@@ -56,6 +56,11 @@ export default function LandingPage() {
         <Link className="btn" to="/login">
           sign in
         </Link>
+        {flags.signup && (
+          <Link className="btn primary" to="/signup">
+            sign up
+          </Link>
+        )}
       </header>
 
       {/* ---- hero ---------------------------------------------------- */}
@@ -76,9 +81,20 @@ export default function LandingPage() {
           ciphertext.
         </p>
         <div className="hero-cta">
-          <Link className="btn primary" to="/login">
-            sign in with email
-          </Link>
+          {flags.signup ? (
+            <>
+              <Link className="btn primary" to="/signup">
+                create free account
+              </Link>
+              <Link className="btn" to="/login">
+                sign in
+              </Link>
+            </>
+          ) : (
+            <Link className="btn primary" to="/login">
+              sign in with email
+            </Link>
+          )}
           <a className="btn" href="#quickstart">
             quickstart
           </a>
@@ -156,7 +172,7 @@ export default function LandingPage() {
               <li>End-to-end encrypted projects &amp; stages</li>
               <li>Web upload + masked KEY=VALUE viewer</li>
               <li>Python CLI, byte-compatible envelopes</li>
-              <li>Invite-only email OTP login</li>
+              <li>{flags.signup ? "Passwordless email OTP signup & login" : "Invite-only email OTP login"}</li>
               <li>Your AWS account: S3 + KMS + Lambda</li>
             </ul>
           </div>
@@ -216,8 +232,17 @@ export default function LandingPage() {
             URLs.
           </li>
           <li>
-            <b>Invite-only.</b> Only admins and invited members can even request a login
-            code — unknown emails get silence, not errors.
+            {flags.signup ? (
+              <>
+                <b>Passwordless.</b> Accounts are an email address proven by a one-time
+                code. Projects stay private until their owner invites someone, per stage.
+              </>
+            ) : (
+              <>
+                <b>Invite-only.</b> Only admins and invited members can even request a
+                login code — unknown emails get silence, not errors.
+              </>
+            )}
           </li>
           <li>
             <b>Stage isolation in IAM.</b> One IAM role per stage, scoped by bucket policy
@@ -273,9 +298,18 @@ export default function LandingPage() {
         <span className="brand">
           enclave<b>-envoy</b>
         </span>
-        <span>encrypted with AES-256-GCM · keys by AWS KMS · invite-only</span>
+        <span>
+          encrypted with AES-256-GCM · keys by AWS KMS ·{" "}
+          {flags.signup ? "passwordless" : "invite-only"}
+        </span>
         <span>
           <a href="#imprint">imprint</a> · <Link to="/login">sign in →</Link>
+          {flags.signup && (
+            <>
+              {" "}
+              · <Link to="/signup">sign up →</Link>
+            </>
+          )}
         </span>
       </footer>
     </div>

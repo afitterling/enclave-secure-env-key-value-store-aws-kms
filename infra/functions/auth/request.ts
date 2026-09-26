@@ -6,11 +6,16 @@ import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { isKnownUser, normalizeEmail } from "../lib/access.js";
 import { ok, badRequest, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
+import { featureEnabled } from "../lib/features.js";
 
 const OTP_DIGITS = 6;
 const TTL_SECONDS = 600; // code valid for 10 minutes
 const RESEND_SECONDS = 60; // minimum gap between OTP mails per address
 const FLOOR_MS = 600; // constant-time floor so known/unknown paths look alike
+
+// Pragmatic address check, same as the admin handler. Also keeps CR/LF and
+// list separators away from the SES destination.
+const EMAIL = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -34,13 +39,18 @@ export async function handler(event: APIGatewayProxyEventV2) {
     return ok({ message: "If that address is registered, a login code has been sent." });
   };
 
-  const { email } = parseBody<{ email?: string }>(event);
+  const { email, signup } = parseBody<{ email?: string; signup?: boolean }>(event);
   if (!email) return badRequest("email is required");
   const normalized = normalizeEmail(email);
+  if (!EMAIL.test(normalized)) return badRequest("a valid email is required");
 
-  // Always return 200 so we don't leak which emails exist; only send mail to
-  // known users (admins or anyone holding a project/team membership).
-  if (await isKnownUser(normalized)) {
+  // Always return 200 so we don't leak which emails exist. Mail goes to known
+  // users (admins, invited members, earlier signups) and, when the `signup`
+  // feature is on, to a new address that asked to sign up. A signup request
+  // for an address that already exists is simply a login.
+  const known = await isKnownUser(normalized);
+  const newSignup = !known && signup === true && featureEnabled("signup");
+  if (known || newSignup) {
     const code = String(randomInt(0, 10 ** OTP_DIGITS)).padStart(OTP_DIGITS, "0");
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + TTL_SECONDS;
@@ -55,6 +65,9 @@ export async function handler(event: APIGatewayProxyEventV2) {
             expiresAt,
             attempts: 0,
             lastSentAt: now,
+            // Tells verify to register the address once the code proves the
+            // caller can read this mailbox. Never set for known users.
+            ...(newSignup ? { signup: true } : {}),
           },
           // Resend throttle: refuse to overwrite a code mailed < RESEND_SECONDS ago.
           ConditionExpression: "attribute_not_exists(email) OR lastSentAt < :cutoff",

@@ -90,8 +90,8 @@ export default function ProjectSettingsPage() {
       </p>
       <h1>Members &amp; teams</h1>
       <p className="sub">
-        Inviting an email is what lets that address log in — access is invite-only. Members
-        see only the stages you grant.
+        Inviting an email gives that address access to this project, and lets it log in
+        even without an account of its own. Members see only the stages you grant.
       </p>
 
       {error && <p className="error">{error}</p>}

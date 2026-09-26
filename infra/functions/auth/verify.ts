@@ -2,10 +2,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
-import { normalizeEmail, permissionsFor } from "../lib/access.js";
+import { normalizeEmail, permissionsFor, registerUser } from "../lib/access.js";
 import { issue } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
+import { featureEnabled } from "../lib/features.js";
 
 const MAX_ATTEMPTS = 5;
 
@@ -62,6 +63,13 @@ export async function handler(event: APIGatewayProxyEventV2) {
   await ddb.send(
     new DeleteCommand({ TableName: process.env.OTP_TABLE, Key: { email: normalized } }),
   );
+
+  // A signup code, now proven: register the address so it can log in again.
+  // Re-checks the flag so switching signup off also stops pending codes.
+  if (item.signup === true) {
+    if (!featureEnabled("signup")) return generic;
+    await registerUser(normalized);
+  }
 
   const token = issue(normalized, process.env.JWT_SIGNING_KEY!);
   return ok({ token, email: normalized, access: await permissionsFor(normalized) });

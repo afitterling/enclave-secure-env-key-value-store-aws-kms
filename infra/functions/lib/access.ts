@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { featureEnabled } from "./features.js";
 
 /**
@@ -11,10 +11,11 @@ import { featureEnabled } from "./features.js";
  *   PROJECT#<p> / TEAM#<t>        { stages[], grantedBy }                     gsi1: TEAM#<t>     -> PROJECT#<p>
  *   TEAM#<t>    / META            { owner, createdAt }
  *   TEAM#<t>    / MEMBER#<email>  { addedBy }                                 gsi1: USER#<email> -> TEAM#<t>
+ *   USER#<email> / PROFILE        { createdAt, via: "signup" }                gsi1: USER#<email> -> PROFILE
  *
- * Login is invite-only: an email is "known" if it is an admin (ADMIN_EMAILS
- * env, comma-separated) or appears in any membership item. Inviting an email
- * to a project or team is what makes it known — no separate signup.
+ * An email is "known" (may request a login code) if it is an admin
+ * (ADMIN_EMAILS env, comma-separated) or has any gsi1 item: a membership from
+ * an invite, or a PROFILE from self-service signup (the `signup` feature).
  *
  * No module-scope caching of results: access changes must apply immediately.
  */
@@ -64,6 +65,32 @@ export async function isKnownUser(email: string): Promise<boolean> {
     }),
   );
   return (out.Count ?? 0) > 0;
+}
+
+/**
+ * Record a self-service signup, which makes the email known from then on.
+ * Idempotent: an existing profile is left as it was.
+ */
+export async function registerUser(email: string): Promise<void> {
+  const e = normalizeEmail(email);
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: table(),
+        Item: {
+          pk: `USER#${e}`,
+          sk: "PROFILE",
+          gsi1pk: `USER#${e}`,
+          gsi1sk: "PROFILE",
+          via: "signup",
+          createdAt: new Date().toISOString(),
+        },
+        ConditionExpression: "attribute_not_exists(pk)",
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name !== "ConditionalCheckFailedException") throw err;
+  }
 }
 
 /** Everything this user can touch: { project: [stages] }. Direct + via teams. */

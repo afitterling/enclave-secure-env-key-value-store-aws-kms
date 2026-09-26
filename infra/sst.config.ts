@@ -20,8 +20,8 @@
 // bucket-policy statement; the AccessTable only grants stages from this list.
 const stages = ["dev", "staging", "prod", "personal"];
 
-// Bootstrap admins: these emails can always log in (and create the first
-// projects). Everyone else must be invited to a project or team first.
+// Bootstrap admins: these emails can always log in. Everyone else either
+// signs up (when `features.signup` is on) or is invited to a project first.
 const adminEmails = ["info@sp33c.tech"];
 
 // The verified SES identity OTP mail is sent from. Used to scope the
@@ -78,8 +78,8 @@ function allowedOrigins(stage: string): string[] {
 const edition: "opensource" | "enterprise" = "enterprise";
 
 const editionFeatures = {
-  opensource: { landing: true, teams: false, fileDelete: true },
-  enterprise: { landing: true, teams: true, fileDelete: true },
+  opensource: { landing: true, teams: false, fileDelete: true, signup: true },
+  enterprise: { landing: true, teams: true, fileDelete: true, signup: true },
 } as const;
 
 // Feature toggles. Enforced in the Lambdas (functions/lib/features.ts) and
@@ -298,6 +298,8 @@ export default $config({
       environment: { ...baseEnv, OTP_TABLE: otpTable.name },
       permissions: [
         accessRead,
+        // Signup registers the address (USER#<email> / PROFILE) once verified.
+        { actions: ["dynamodb:PutItem"], resources: [accessTable.arn] },
         {
           actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
           resources: [otpTable.arn],

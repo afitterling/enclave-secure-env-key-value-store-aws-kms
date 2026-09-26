@@ -46,8 +46,8 @@ async function request<T>(path: string, init: { method?: string; body?: unknown;
 
 // ---- auth ------------------------------------------------------------------
 
-export const authRequest = (email: string) =>
-  request<{ message: string }>("/auth/request", { body: { email }, auth: false });
+export const authRequest = (email: string, signup = false) =>
+  request<{ message: string }>("/auth/request", { body: { email, signup }, auth: false });
 
 export const authVerify = (email: string, code: string) =>
   request<{ token: string; email: string; access: Record<string, string[]> }>("/auth/verify", {

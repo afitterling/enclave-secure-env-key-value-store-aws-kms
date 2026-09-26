@@ -17,6 +17,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={flags.landing ? <LandingPage /> : <LoginPage />} />
         <Route path="/login" element={<LoginPage />} />
+        {flags.signup && <Route path="/signup" element={<LoginPage mode="signup" />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     );

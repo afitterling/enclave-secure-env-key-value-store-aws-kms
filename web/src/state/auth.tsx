@@ -10,7 +10,7 @@ interface Session {
 
 interface AuthContextValue {
   session: Session | null;
-  requestCode: (email: string) => Promise<void>;
+  requestCode: (email: string, signup?: boolean) => Promise<void>;
   verifyCode: (email: string, code: string) => Promise<void>;
   refreshAccess: () => Promise<void>;
   logout: () => void;
@@ -52,8 +52,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => api.setOnUnauthorized(null);
   }, [logout]);
 
-  const requestCode = useCallback(async (email: string) => {
-    await api.authRequest(email);
+  const requestCode = useCallback(async (email: string, signup = false) => {
+    await api.authRequest(email, signup);
   }, []);
 
   const verifyCode = useCallback(async (email: string, code: string) => {
