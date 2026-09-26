@@ -361,17 +361,17 @@ export default $config({
     api.route("POST /api/admin/{proxy+}", adminDef);
 
     // ---- Edge WAF ---------------------------------------------------------
-    // The Web ACL itself is owned by the central `waf-acls` app (AWS-Admin/WAF
-    // (sst), SEC-006) as `EnclaveEdge`: the same per-IP flood backstop (2000 /
-    // 5 min) and the same tighter cap on POST under /api/ (100 / 5 min) this
-    // stack used to define for itself, plus AWS's managed rule groups, request
-    // logging and attack alarms. That app publishes the ARN to SSM; we read it
-    // and bind it to the distribution below. The param lives in us-east-1
-    // whatever the origin region, hence the lookup-only provider. Production
-    // only: a Web ACL bills per month plus per request.
+    // The Web ACL is the account's one shared ACL, `WAF202606`, owned by the
+    // central `waf-acls` app (~/dev/2026/Admin-Home/AWS-Firewall, SEC-006,
+    // ADR-0001). It carries the per-IP flood backstop (2000 / 5 min) and a POST
+    // cap of 50 / 5 min, stricter than the 100 on POST /api/ this stack used to
+    // define for itself, plus AWS's managed rule groups, request logging and
+    // attack alarms. That app publishes the ARN to SSM; we read it and bind it
+    // to the distribution below. The param lives in us-east-1 whatever the
+    // origin region, hence the lookup-only provider. Production only.
     const edgeAclArn = isProduction
       ? aws.ssm.getParameterOutput(
-          { name: "/waf/production/EnclaveEdge" },
+          { name: "/waf/production/WAF202606" },
           { provider: new aws.Provider("UsEast1", { region: "us-east-1" }) },
         ).value
       : undefined;
