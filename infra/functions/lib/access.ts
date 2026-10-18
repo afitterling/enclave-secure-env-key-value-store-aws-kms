@@ -1,6 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { featureEnabled } from "./features.js";
+import type { Claims } from "./jwt.js";
 
 /**
  * Dynamic access map backed by DynamoDB (ACCESS_TABLE), replacing the old
@@ -12,6 +13,7 @@ import { featureEnabled } from "./features.js";
  *   TEAM#<t>    / META            { owner, createdAt }
  *   TEAM#<t>    / MEMBER#<email>  { addedBy }                                 gsi1: USER#<email> -> TEAM#<t>
  *   USER#<email> / PROFILE        { createdAt, via: "signup" }                gsi1: USER#<email> -> PROFILE
+ *   PROJECT#<p> / MACHINE#<id>    machine-identity binding (lib/machines.ts)  no gsi1: not a user
  *
  * An email is "known" (may request a login code) if it is an admin
  * (ADMIN_EMAILS env, comma-separated) or has any gsi1 item: a membership from
@@ -200,4 +202,40 @@ export async function canAccess(email: string, project: string, stage: string): 
     if (membership.Item) return true;
   }
   return false;
+}
+
+export type VaultAction = "read" | "write";
+
+/**
+ * The one gate in front of KMS and S3, for both kinds of principal:
+ *
+ *   human   -> canAccess(): owners and members, no read/write distinction
+ *   machine -> the binding named in the token, re-read now: it must still
+ *              exist with the same `rev`, belong to the token's project,
+ *              list the stage, and grant `write` for writes
+ *
+ * Both paths read DynamoDB on every call, so removing a member or a binding
+ * takes effect on the next request, not when a token expires.
+ */
+export async function authorize(
+  claims: Claims,
+  project: string,
+  stage: string,
+  action: VaultAction,
+): Promise<boolean> {
+  if (claims.typ !== "machine") return canAccess(claims.sub, project, stage);
+
+  if (!featureEnabled("machineIdentities")) return false;
+  if (!validStages().includes(stage)) return false;
+  if (claims.prj !== project) return false;
+  const out = await ddb.send(
+    new GetCommand({
+      TableName: table(),
+      Key: { pk: `PROJECT#${project}`, sk: `MACHINE#${claims.mid}` },
+    }),
+  );
+  const binding = out.Item;
+  if (!binding || binding.rev !== claims.rev) return false;
+  if (!Array.isArray(binding.stages) || !binding.stages.includes(stage)) return false;
+  return action === "read" || binding.access === "write";
 }

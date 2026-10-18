@@ -6,10 +6,10 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
-import { canAccess } from "../lib/access.js";
+import { authorize } from "../lib/access.js";
 import { featureEnabled } from "../lib/features.js";
 import { s3ForStage } from "../lib/assume.js";
-import { requireAuth } from "../lib/jwt.js";
+import { requirePrincipal, type Claims } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
 
@@ -38,9 +38,9 @@ export async function handler(event: APIGatewayProxyEventV2) {
   const blocked = edgeRejection(event);
   if (blocked) return blocked;
 
-  let email: string;
+  let claims: Claims;
   try {
-    email = requireAuth(event, process.env.JWT_SIGNING_KEY!).sub;
+    claims = requirePrincipal(event, process.env.JWT_SIGNING_KEY!);
   } catch {
     return unauthorized();
   }
@@ -48,11 +48,16 @@ export async function handler(event: APIGatewayProxyEventV2) {
   const { op, project, stage, file } = parseBody<Body>(event);
   if (!op || !project || !stage) return badRequest("op, project and stage are required");
   if (!safeName(project) || !safeName(stage)) return badRequest("invalid project/stage");
-  if (!(await canAccess(email, project, stage))) return forbidden("no access to this project/stage");
+  const action = op === "upload" || op === "delete" ? "write" : "read";
+  if (!(await authorize(claims, project, stage, action))) {
+    return forbidden("no access to this project/stage");
+  }
 
   const bucket = process.env.BUCKET!;
   const prefix = `${project}/${stage}/`;
-  const s3 = await s3ForStage(stage, email);
+  // The STS session name shows up in CloudTrail for every S3 call made with
+  // the presigned URL, so it names the principal: an email or machine:<p>/<id>.
+  const s3 = await s3ForStage(stage, claims.sub);
 
   if (op === "list") {
     const out = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));

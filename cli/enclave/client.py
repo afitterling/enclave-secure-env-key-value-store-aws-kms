@@ -48,6 +48,14 @@ class ApiClient:
     def auth_verify(self, email: str, code: str) -> dict:
         return self._post("/auth/verify", {"email": email, "code": code})
 
+    def workload_info(self) -> dict:
+        """Audience + signed-header name a workload must bind its proof to."""
+        return self._get("/auth/workload")
+
+    def workload_login(self, body: dict) -> dict:
+        """Exchange an OIDC token or a signed STS request for a machine token."""
+        return self._post("/auth/workload", body)
+
     def whoami(self) -> dict:
         return self._get("/access/whoami", auth=True)
 

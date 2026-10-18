@@ -1,6 +1,6 @@
 [project]
 name = "enclave-envoy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Securely sync dotfiles across devices via AWS S3 + KMS envelope encryption"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.9"
@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
+aws = ["botocore>=1.31"]
 
 [project.scripts]
 enclave = "enclave.cli:main"

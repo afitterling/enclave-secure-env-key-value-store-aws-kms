@@ -10,6 +10,7 @@ import {
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { normalizeEmail, validStages } from "../lib/access.js";
 import { featureEnabled } from "../lib/features.js";
+import { newRev, toBinding, validateBinding } from "../lib/machines.js";
 import { requireAuth } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, json, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
@@ -24,12 +25,16 @@ import { edgeRejection } from "../lib/edge.js";
  *   POST /admin/projects/{p}/members/remove       { email }              owner only
  *   POST /admin/projects/{p}/teams                { team, stages }       owner only (upsert grant)
  *   POST /admin/projects/{p}/teams/remove         { team }               owner only
+ *   POST /admin/projects/{p}/machines             binding (lib/machines) owner only (upsert)
+ *   POST /admin/projects/{p}/machines/remove      { id }                 owner only
  *   GET  /admin/teams                             list my teams
  *   POST /admin/teams                             { team }               create; caller becomes owner
  *   GET  /admin/teams/{t}                         detail (members only)
  *   POST /admin/teams/{t}/members                 { email }              owner only
  *   POST /admin/teams/{t}/members/remove          { email }              owner only
  *
+ * Machine identities are listed in the project detail, gated on the
+ * `machineIdentities` feature.
  * Mutations are POST-only so the API-GW CORS surface stays GET/POST.
  * Ids share the S3-safe regex with presign. Stage lists are validated
  * against the fixed STAGES set at write time.
@@ -169,7 +174,13 @@ async function projectDetail(email: string, project: string) {
     team: (t.sk as string).slice("TEAM#".length),
     stages: (t.stages as string[]) ?? [],
   }));
-  return ok({ project, owner: meta.owner as string, members, teams });
+  const machines = featureEnabled("machineIdentities")
+    ? (await queryPrefix(`PROJECT#${project}`, "MACHINE#")).map((item) => {
+        const { rev: _rev, ...binding } = toBinding(item);
+        return binding;
+      })
+    : [];
+  return ok({ project, owner: meta.owner as string, members, teams, machines });
 }
 
 async function requireOwner(pk: string, email: string) {
@@ -258,6 +269,45 @@ async function removeTeamGrant(email: string, project: string, body: Record<stri
       TableName: TABLE(),
       Key: { pk: `PROJECT#${project}`, sk: `TEAM#${team}` },
     }),
+  );
+  return ok({ ok: true });
+}
+
+// ---- machine identities ----------------------------------------------------
+
+async function upsertMachine(email: string, project: string, body: Record<string, unknown>) {
+  if (!featureEnabled("machineIdentities")) return forbidden("machine identities are not enabled");
+  const denied = await requireOwner(`PROJECT#${project}`, email);
+  if (denied) return denied;
+  const result = validateBinding(body);
+  if (!result.ok) return badRequest(result.error);
+  const { id, ...rest } = result.binding;
+  // A fresh rev on every write: tokens minted under the previous rules stop
+  // working immediately (access.authorize compares it).
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE(),
+      Item: {
+        pk: `PROJECT#${project}`,
+        sk: `MACHINE#${id}`,
+        ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)),
+        rev: newRev(),
+        createdBy: email,
+        createdAt: new Date().toISOString(),
+      },
+    }),
+  );
+  return ok({ ok: true, id });
+}
+
+async function removeMachine(email: string, project: string, body: Record<string, unknown>) {
+  if (!featureEnabled("machineIdentities")) return forbidden("machine identities are not enabled");
+  const denied = await requireOwner(`PROJECT#${project}`, email);
+  if (denied) return denied;
+  const id = typeof body.id === "string" ? body.id : "";
+  if (!id || !safeName(id)) return badRequest("id is required");
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE(), Key: { pk: `PROJECT#${project}`, sk: `MACHINE#${id}` } }),
   );
   return ok({ ok: true });
 }
@@ -381,6 +431,8 @@ export async function handler(event: APIGatewayProxyEventV2) {
     if (method !== "POST") return badRequest("unknown route");
     if (sub === "members" && !action) return upsertProjectMember(email, id, body);
     if (sub === "members" && action === "remove") return removeProjectMember(email, id, body);
+    if (sub === "machines" && !action) return upsertMachine(email, id, body);
+    if (sub === "machines" && action === "remove") return removeMachine(email, id, body);
     if (sub === "teams") {
       if (!featureEnabled("teams")) return notFound("teams are not enabled");
       if (!action) return upsertTeamGrant(email, id, body);

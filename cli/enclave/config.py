@@ -1,4 +1,12 @@
-"""Local config + session persistence under ~/.enclave."""
+"""Local config + session persistence under ~/.enclave.
+
+Two environment variables override the files, so CI jobs and containers never
+need to write anything to disk:
+
+    ENCLAVE_API_URL  beats config.json's api_url
+    ENCLAVE_TOKEN    beats session.json's token (e.g. a machine token from
+                     `enclave machine-login --print-token`)
+"""
 
 from __future__ import annotations
 
@@ -39,6 +47,9 @@ class Config:
         _write_private(CONFIG_FILE, {"api_url": self.api_url})
 
     def require_api_url(self) -> str:
+        env_url = os.environ.get("ENCLAVE_API_URL")
+        if env_url:
+            return env_url.rstrip("/")
         if not self.api_url:
             raise SystemExit("No API URL configured. Run: enclave configure --api-url <url>")
         return self.api_url.rstrip("/")
@@ -63,6 +74,9 @@ class Session:
         SESSION_FILE.unlink(missing_ok=True)
 
     def require_token(self) -> str:
+        env_token = os.environ.get("ENCLAVE_TOKEN")
+        if env_token:
+            return env_token
         if not self.token:
             raise SystemExit("Not logged in. Run: enclave login <email>")
         return self.token

@@ -237,7 +237,8 @@ select {
 }
 
 input[type="text"],
-input[type="email"] {
+input[type="email"],
+.field select {
   width: 100%;
   background: var(--bg-inset);
   border: 1px solid var(--line-strong);
@@ -249,7 +250,8 @@ input[type="email"] {
 }
 
 input[type="text"]:focus,
-input[type="email"]:focus {
+input[type="email"]:focus,
+.field select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px rgba(232, 163, 61, 0.2);
 }

@@ -16,21 +16,48 @@ function sign(data: string, secret: string): string {
 }
 
 export interface Claims {
-  sub: string; // user email (normalized)
+  sub: string; // user email (normalized), or machine:<project>/<identity>
   iat: number;
   exp: number;
   iss?: string;
   aud?: string;
+  // Machine tokens only (see auth/workload.ts). A human token has none of these.
+  typ?: "machine";
+  prj?: string; // project the binding belongs to
+  mid?: string; // binding (identity) id within the project
+  rev?: string; // binding revision; a re-created binding invalidates old tokens
+  src?: string; // who proved it: OIDC `sub` or the caller's AWS ARN (audit only)
+}
+
+export type MachineClaims = Required<Pick<Claims, "prj" | "mid" | "rev" | "src">>;
+
+function encode(body: Record<string, unknown>, secret: string): string {
+  const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = b64url(JSON.stringify(body));
+  const sig = sign(`${header}.${payload}`, secret);
+  return `${header}.${payload}.${sig}`;
 }
 
 export function issue(email: string, secret: string, ttlSeconds = 3600): string {
   const now = Math.floor(Date.now() / 1000);
-  const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const payload = b64url(
-    JSON.stringify({ sub: email, iat: now, exp: now + ttlSeconds, iss: ISS, aud: AUD }),
+  return encode({ sub: email, iat: now, exp: now + ttlSeconds, iss: ISS, aud: AUD }, secret);
+}
+
+/** Short-lived token for a workload that proved a machine-identity binding. */
+export function issueMachine(m: MachineClaims, secret: string, ttlSeconds = 900): string {
+  const now = Math.floor(Date.now() / 1000);
+  return encode(
+    {
+      sub: `machine:${m.prj}/${m.mid}`,
+      typ: "machine",
+      ...m,
+      iat: now,
+      exp: now + ttlSeconds,
+      iss: ISS,
+      aud: AUD,
+    },
+    secret,
   );
-  const sig = sign(`${header}.${payload}`, secret);
-  return `${header}.${payload}.${sig}`;
 }
 
 /** Returns claims if valid+unexpired, otherwise throws.
@@ -56,11 +83,20 @@ export function verify(token: string, secret: string): Claims {
   if (typeof claims.exp !== "number" || claims.exp <= now) throw new Error("token expired");
   if (claims.iss !== ISS || claims.aud !== AUD) throw new Error("bad issuer/audience");
   if (typeof claims.sub !== "string" || !claims.sub) throw new Error("bad subject");
+  if (claims.typ !== undefined && claims.typ !== "machine") throw new Error("bad token type");
+  if (
+    claims.typ === "machine" &&
+    ![claims.prj, claims.mid, claims.rev].every((v) => typeof v === "string" && v)
+  ) {
+    throw new Error("bad machine claims");
+  }
   return claims;
 }
 
-/** Extract + verify a Bearer token from an API Gateway v2 event. */
-export function requireAuth(
+/** Extract + verify a Bearer token (human or machine) from an API Gateway v2 event.
+ * Only the vault endpoints (datakey, presign) accept machine tokens, and they
+ * must then authorize through access.authorize(), which understands both. */
+export function requirePrincipal(
   event: { headers?: Record<string, string | undefined> },
   secret: string,
 ): Claims {
@@ -69,4 +105,16 @@ export function requireAuth(
   const [scheme, token] = header.split(" ");
   if (scheme !== "Bearer" || !token) throw new Error("missing bearer token");
   return verify(token, secret);
+}
+
+/** Like requirePrincipal, but human sessions only. The default for every
+ * endpoint: a machine `sub` is not an email and must never become a project
+ * owner, an inviter, or anything else the admin routes key on. */
+export function requireAuth(
+  event: { headers?: Record<string, string | undefined> },
+  secret: string,
+): Claims {
+  const claims = requirePrincipal(event, secret);
+  if (claims.typ === "machine") throw new Error("machine tokens are not accepted here");
+  return claims;
 }

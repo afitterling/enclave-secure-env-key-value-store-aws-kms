@@ -1,7 +1,7 @@
 import { KMSClient, GenerateDataKeyCommand, DecryptCommand } from "@aws-sdk/client-kms";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
-import { canAccess } from "../lib/access.js";
-import { requireAuth } from "../lib/jwt.js";
+import { authorize } from "../lib/access.js";
+import { requirePrincipal, type Claims } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
 
@@ -38,9 +38,9 @@ export async function handler(event: APIGatewayProxyEventV2) {
   const blocked = edgeRejection(event);
   if (blocked) return blocked;
 
-  let email: string;
+  let claims: Claims;
   try {
-    email = requireAuth(event, process.env.JWT_SIGNING_KEY!).sub;
+    claims = requirePrincipal(event, process.env.JWT_SIGNING_KEY!);
   } catch {
     return unauthorized();
   }
@@ -48,7 +48,11 @@ export async function handler(event: APIGatewayProxyEventV2) {
   const { op, project, stage, ciphertext } = parseBody<Body>(event);
   if (!op || !project || !stage) return badRequest("op, project and stage are required");
   if (!safeName(project) || !safeName(stage)) return badRequest("invalid project/stage");
-  if (!(await canAccess(email, project, stage))) return forbidden("no access to this project/stage");
+  // Minting a data key is only ever done to write a file; unwrapping one is a read.
+  const action = op === "generate" ? "write" : "read";
+  if (!(await authorize(claims, project, stage, action))) {
+    return forbidden("no access to this project/stage");
+  }
 
   const encryptionContext = { project, stage, app: "enclave-envoy" };
 

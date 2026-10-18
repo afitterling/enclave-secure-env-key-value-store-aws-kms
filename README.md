@@ -42,6 +42,9 @@ enclave-envoy-tool/
 │   └── enclave/
 │       ├── cli.py             # `enclave` command (click)
 │       ├── auth.py            # email-OTP login + token storage
+│       ├── workload.py        # machine login: GitHub/OIDC tokens, signed AWS STS
+│       ├── container.py       # `enclave run`: hardened docker/podman launcher
+│       ├── dotenv.py          # in-memory env-file parsing for exec/run
 │       ├── client.py          # thin HTTPS client for the API
 │       ├── crypto.py          # AES-256-GCM envelope format
 │       ├── sync.py            # bulk push/pull of dotfiles
@@ -56,7 +59,8 @@ enclave-envoy-tool/
     ├── package.json
     └── functions/
         ├── lib/{jwt,access,assume,response}.ts   # access.ts = DynamoDB access map
-        ├── auth/{request,verify}.ts
+        ├── lib/{machines,oidc,awsiam}.ts       # machine-identity bindings + verifiers
+        ├── auth/{request,verify,workload}.ts
         ├── access/whoami.ts
         ├── admin/handler.ts   # projects/teams/members/grants (web UI)
         ├── crypto/datakey.ts
@@ -101,6 +105,123 @@ enclave push --project webapp --stage dev --glob "./.env*"
 # on another device (or a teammate's), after logging in:
 enclave pull --project webapp --stage dev --dest ./
 ```
+
+## Machine identities and running workloads
+
+Humans log in with an emailed code. Workloads (CI jobs, containers, Lambdas,
+Kubernetes pods) never should, and should not hold a stored key either. A project
+owner instead **binds the workload's own platform identity** to stages of the
+project on the project's settings page, or via `POST /api/admin/projects/<p>/machines`:
+
+| Source            | Bound by                                                                  |
+| ----------------- | ------------------------------------------------------------------------- |
+| GitHub Actions    | `repository` (`owner/repo`), optionally `ref` / `environment`; or `sub`   |
+| Any OIDC issuer   | issuer URL + a `sub` pattern (GitLab CI, Kubernetes service accounts, …)  |
+| AWS IAM role      | account id + role name; proven with a signed `sts:GetCallerIdentity`      |
+
+Each binding grants `read` (pull and decrypt) or `write` (also upload and
+delete) on a chosen set of stages. `*` in a pattern matches anything except
+`:`. The server refuses bindings that would admit strangers: a GitHub binding
+must pin an owner, and other issuers need a literal `sub` prefix.
+Machine tokens live 15 minutes, work only on `/crypto/datakey` and
+`/s3/presign`, and are re-checked against the binding on every call. Editing
+or removing a binding cuts them off immediately. Tokens must be minted for the
+deployment's audience, printed by `sst deploy` as `WorkloadAudience` and served
+at `GET /api/auth/workload`. The flag is `features.machineIdentities`.
+
+### Logging in as a workload
+
+A project owner binds a platform identity to a project (stages + read/write).
+The workload then trades a token its platform already gives it for a 15-minute
+enclave token, valid only for `/crypto/datakey` and `/s3/presign` in that scope.
+
+```bash
+enclave machine-login --project webapp --identity ci --github           # GitHub Actions OIDC
+enclave machine-login --project webapp --identity k8s \
+  --oidc-token-file /var/run/secrets/tokens/enclave                      # Kubernetes projected token
+enclave machine-login --project webapp --identity gitlab --oidc-token-env ENCLAVE_ID_TOKEN
+enclave machine-login --project webapp --identity ecs --aws             # IAM role, signed sts:GetCallerIdentity
+```
+
+`--aws` needs `pip install 'enclave-envoy[aws]'` (botocore). The signed STS
+request includes an `x-enclave-server-id` header bound to this deployment's
+audience, so it cannot be replayed against another enclave server. Add
+`--print-token` to get just the token, and set `ENCLAVE_TOKEN` / `ENCLAVE_API_URL`
+so nothing is written to `~/.enclave`:
+
+```yaml
+# .github/workflows/deploy.yml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # lets the job mint an OIDC token
+      contents: read
+    env:
+      ENCLAVE_API_URL: https://enclavecore.app/api
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install enclave-envoy
+      - run: echo "ENCLAVE_TOKEN=$(enclave machine-login --project webapp --identity ci --github --print-token)" >> "$GITHUB_ENV"
+      - run: enclave exec -p webapp -s prod -- npm run deploy
+```
+
+### `enclave exec`: secrets into a process, never onto disk
+
+```bash
+enclave exec -p webapp -s dev -- npm run dev
+enclave exec -p webapp -s dev --file .env --file .env.local --no-override -- ./manage.py migrate
+```
+
+Env files are downloaded and decrypted in memory and merged in order (later
+files win). With no `--file`, every stored `.env`, `.env.*` and `*.env` file is
+loaded. Secrets override the existing environment unless `--no-override`.
+Signals are forwarded and the command's exit code is returned.
+
+### `enclave run`: a hardened container with the stage's secrets
+
+```bash
+enclave run -p webapp -s prod -- ghcr.io/acme/api@sha256:<digest>
+enclave run -p webapp -s prod --as-files --network none --publish 8080:8080 \
+  --cosign-key cosign.pub -- ghcr.io/acme/api@sha256:<digest> serve
+```
+
+Always applied, with no flag to turn them off:
+
+| Default                                         | Why                                                         |
+| ----------------------------------------------- | ----------------------------------------------------------- |
+| `--rm --init`                                   | no leftover container holding secrets; PID 1 reaps zombies  |
+| `--read-only` (`--writable` to drop)            | the image cannot be modified at runtime                     |
+| `--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m`  | scratch space that cannot run binaries                      |
+| `--cap-drop ALL`                                | `--cap-add` only for NET_BIND_SERVICE, CHOWN, SETUID, SETGID, FOWNER |
+| `--security-opt no-new-privileges`              | setuid binaries cannot escalate                             |
+| `--ipc private`                                 | no shared memory with other containers                      |
+| `--user 65534:65534`                            | non-root (your own uid with `--as-files`, see below)        |
+| `--pids-limit 256 --memory 512m`                | fork bombs and memory exhaustion stay contained             |
+
+Refused outright: `--network host` / `container:*`, mounting an engine socket
+(`*.sock`), `/`, `/proc`, `/sys`, `/dev`, `/etc`, `/run`, `/var/run`, your home
+directory or any parent of it, and anything under `~/.ssh`, `~/.aws` or
+`~/.enclave` (symlinks are resolved first). Volumes are read-only unless `:rw`.
+
+Images must be pinned by `@sha256:` digest unless you pass `--allow-unpinned`.
+`--cosign-key KEY` runs `cosign verify` before anything starts.
+
+How secrets reach the container:
+
+- **Default (env):** argv carries only `-e KEY`. The values live in the environment
+  of the docker/podman CLI process (which gets a minimal environment, not yours),
+  so they never appear on disk or in `ps`. The engine still stores them in the
+  container config, so they are visible to `docker inspect`, which is root-equivalent anyway.
+- **`--as-files`:** one 0400 file per key plus `.env` in a 0700 directory on RAM-backed
+  `/dev/shm` (disk-backed temp dir with a warning where there is none, e.g. macOS),
+  mounted read-only at `/run/secrets` and deleted when the container exits.
+  The container runs as your own uid (still non-root) so it can read them;
+  rootless podman gets `--userns keep-id`. Rootless *docker* maps your uid to
+  root in the container, where the files show up as owned by root. Pass `--user 0:0` there, or use env mode.
+
+`--dry-run` prints the engine command, which contains secret names only.
+Engine: `--engine`, else `$ENCLAVE_CONTAINER_ENGINE`, else `docker`, else `podman`.
 
 ## Deploying a production stage
 
