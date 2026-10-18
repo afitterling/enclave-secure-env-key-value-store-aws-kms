@@ -39,6 +39,7 @@ export interface MachineBinding {
   rev: string;
   createdBy?: string;
   createdAt?: string;
+  grantExpiresAt?: string;
 }
 
 const safeName = (name: string) => /^[\w.@+-]+$/.test(name);
@@ -211,5 +212,6 @@ export function toBinding(item: Record<string, unknown>): MachineBinding {
     rev: item.rev as string,
     createdBy: item.createdBy as string | undefined,
     createdAt: item.createdAt as string | undefined,
+    grantExpiresAt: item.grantExpiresAt as string | undefined,
   };
 }

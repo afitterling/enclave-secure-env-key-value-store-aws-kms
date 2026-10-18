@@ -27,6 +27,8 @@ export interface Claims {
   mid?: string; // binding (identity) id within the project
   rev?: string; // binding revision; a re-created binding invalidates old tokens
   src?: string; // who proved it: OIDC `sub` or the caller's AWS ARN (audit only)
+  run?: string; // cloud-runner tokens: the run (ECS task id) this token is for
+  act?: string; // cloud-runner tokens: the principal who launched the run
 }
 
 export type MachineClaims = Required<Pick<Claims, "prj" | "mid" | "rev" | "src">>;
@@ -96,6 +98,29 @@ export function verify(token: string, secret: string): Claims {
 /** Extract + verify a Bearer token (human or machine) from an API Gateway v2 event.
  * Only the vault endpoints (datakey, presign) accept machine tokens, and they
  * must then authorize through access.authorize(), which understands both. */
+/** One-time token for a cloud-runner init container (runner/launch.ts).
+ * `rev` is the run's nonce; access.authorize() checks it against the run. */
+export function issueRunner(
+  r: { prj: string; run: string; rev: string; src: string; act: string },
+  secret: string,
+  ttlSeconds = 900,
+): string {
+  const now = Math.floor(Date.now() / 1000);
+  return encode(
+    {
+      sub: `runner:${r.run}`,
+      typ: "machine",
+      mid: "@runner",
+      ...r,
+      iat: now,
+      exp: now + ttlSeconds,
+      iss: ISS,
+      aud: AUD,
+    },
+    secret,
+  );
+}
+
 export function requirePrincipal(
   event: { headers?: Record<string, string | undefined> },
   secret: string,

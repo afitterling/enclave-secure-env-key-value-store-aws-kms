@@ -11,6 +11,7 @@ import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { normalizeEmail, validStages } from "../lib/access.js";
 import { featureEnabled } from "../lib/features.js";
 import { newRev, toBinding, validateBinding } from "../lib/machines.js";
+import { auditLog, entitlements, grantExpiry } from "./ciem.js";
 import { requireAuth } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, json, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
@@ -33,8 +34,12 @@ import { edgeRejection } from "../lib/edge.js";
  *   POST /admin/teams/{t}/members                 { email }              owner only
  *   POST /admin/teams/{t}/members/remove          { email }              owner only
  *
+ *   GET  /admin/projects/{p}/entitlements         CIEM view (admin/ciem.ts)  owner only
+ *   GET  /admin/projects/{p}/audit                audit events               owner only
+ *
  * Machine identities are listed in the project detail, gated on the
- * `machineIdentities` feature.
+ * `machineIdentities` feature. Members and bindings take an optional
+ * `expiresInHours` (ciem feature) for time-boxed, just-in-time grants.
  * Mutations are POST-only so the API-GW CORS surface stays GET/POST.
  * Ids share the S3-safe regex with presign. Stage lists are validated
  * against the fixed STAGES set at write time.
@@ -169,6 +174,7 @@ async function projectDetail(email: string, project: string) {
     email: (m.sk as string).slice("MEMBER#".length),
     role: m.role as string,
     stages: m.role === "owner" ? validStages() : ((m.stages as string[]) ?? []),
+    ...(m.grantExpiresAt ? { grantExpiresAt: m.grantExpiresAt as string } : {}),
   }));
   const teams = (await queryPrefix(`PROJECT#${project}`, "TEAM#")).map((t) => ({
     team: (t.sk as string).slice("TEAM#".length),
@@ -198,6 +204,8 @@ async function upsertProjectMember(email: string, project: string, body: Record<
   if (!EMAIL.test(invitee)) return badRequest("a valid email is required");
   const stages = validStageList(body.stages);
   if (!stages) return badRequest(`stages must be a non-empty subset of ${validStages().join(", ")}`);
+  const expiry = grantExpiry(body);
+  if ("error" in expiry) return badRequest(expiry.error);
   const existing = await getMember(`PROJECT#${project}`, invitee);
   if (existing?.role === "owner") return badRequest("cannot change the owner's access");
   await ddb.send(
@@ -212,6 +220,7 @@ async function upsertProjectMember(email: string, project: string, body: Record<
         stages,
         addedBy: email,
         createdAt: new Date().toISOString(),
+        ...(expiry.at ? { grantExpiresAt: expiry.at } : {}),
       },
     }),
   );
@@ -281,6 +290,8 @@ async function upsertMachine(email: string, project: string, body: Record<string
   if (denied) return denied;
   const result = validateBinding(body);
   if (!result.ok) return badRequest(result.error);
+  const expiry = grantExpiry(body);
+  if ("error" in expiry) return badRequest(expiry.error);
   const { id, ...rest } = result.binding;
   // A fresh rev on every write: tokens minted under the previous rules stop
   // working immediately (access.authorize compares it).
@@ -294,6 +305,7 @@ async function upsertMachine(email: string, project: string, body: Record<string
         rev: newRev(),
         createdBy: email,
         createdAt: new Date().toISOString(),
+        ...(expiry.at ? { grantExpiresAt: expiry.at } : {}),
       },
     }),
   );
@@ -428,6 +440,14 @@ export async function handler(event: APIGatewayProxyEventV2) {
   if (root === "projects") {
     if (!id) return method === "GET" ? listProjects(email) : createProject(email, body);
     if (!sub) return method === "GET" ? projectDetail(email, id) : badRequest("unknown route");
+    if (method === "GET" && (sub === "entitlements" || sub === "audit") && !action) {
+      if (!featureEnabled("ciem")) return forbidden("entitlement management is not enabled");
+      const denied = await requireOwner(`PROJECT#${id}`, email);
+      if (denied) return denied;
+      return sub === "entitlements"
+        ? entitlements(id)
+        : auditLog(id, event.queryStringParameters ?? {});
+    }
     if (method !== "POST") return badRequest("unknown route");
     if (sub === "members" && !action) return upsertProjectMember(email, id, body);
     if (sub === "members" && action === "remove") return removeProjectMember(email, id, body);

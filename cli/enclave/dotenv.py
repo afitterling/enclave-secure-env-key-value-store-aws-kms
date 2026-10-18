@@ -101,3 +101,13 @@ def shell_quote_line(key: str, value: str) -> str:
         value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
     )
     return f'{key}="{escaped}"'
+
+
+def posix_export_line(key: str, value: str) -> str:
+    """Render KEY=VALUE as `export KEY='...'` that any POSIX sh sources verbatim.
+
+    Single quotes are the only sh quoting with no expansion at all (`$`,
+    backticks and backslashes stay literal, newlines included); an embedded
+    single quote is closed, escaped and reopened.
+    """
+    return "export " + key + "='" + value.replace("'", "'\\''") + "'"

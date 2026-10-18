@@ -77,9 +77,19 @@ function allowedOrigins(stage: string): string[] {
 // toggles below — individual flags can still be overridden after the spread.
 const edition: "opensource" | "enterprise" = "enterprise";
 
+//   ciem         audit trail, effective entitlements + findings, time-boxed grants
+//   cloudRunner  Fargate cloud runner (functions/runner/*). Needs Docker at deploy
+//                time to build the init image from ../cli, and creates a VPC (no
+//                NAT) + cluster.
 const editionFeatures = {
-  opensource: { landing: true, teams: false, fileDelete: true, signup: true, machineIdentities: true },
-  enterprise: { landing: true, teams: true, fileDelete: true, signup: true, machineIdentities: true },
+  opensource: {
+    landing: true, teams: false, fileDelete: true, signup: true, machineIdentities: true,
+    ciem: false, cloudRunner: false,
+  },
+  enterprise: {
+    landing: true, teams: true, fileDelete: true, signup: true, machineIdentities: true,
+    ciem: true, cloudRunner: true,
+  },
 } as const;
 
 // Feature toggles. Enforced in the Lambdas (functions/lib/features.ts) and
@@ -88,6 +98,15 @@ const features: Record<string, boolean> = {
   ...editionFeatures[edition],
   // per-flag overrides go here, e.g. `fileDelete: false`
 };
+
+// CIEM: how long audit events are kept, and the look-back window after which an
+// unused grant becomes a finding.
+const auditRetentionDays = 90;
+const ciemUnusedDays = 30;
+
+// Cloud runner: registries images may come from (prefix match). Empty = any,
+// as long as the image is pinned by digest.
+const runnerRegistries: string[] = [];
 
 export default $config({
   app(input) {
@@ -115,6 +134,10 @@ export default $config({
     // the signed x-enclave-server-id header of an AWS STS request. Unique per
     // deployment, so a token or signed request made for one enclave deployment
     // cannot be replayed against another. Printed as WorkloadAudience.
+    // Fixed name (not generated) so the workload Lambda can be told which role
+    // a runner task assumes without depending on the runner stack.
+    const runnerTaskRoleName = `enclave-envoy-${$app.stage}-runner-task`;
+
     const workloadAudience = siteDomain
       ? `https://${siteDomain}`
       : `enclave-envoy:${accountId}:${$app.stage}`;
@@ -166,6 +189,26 @@ export default $config({
       primaryIndex: { hashKey: "pk", rangeKey: "sk" },
       globalIndexes: { gsi1: { hashKey: "gsi1pk", rangeKey: "gsi1sk" } },
     });
+
+    // ---- DynamoDB: audit trail (CIEM) --------------------------------------
+    // Events (TTL-expired) and per-principal usage rollups; see lib/audit.ts.
+    const auditTable = features.ciem
+      ? new sst.aws.Dynamo("AuditTable", {
+          fields: { pk: "string", sk: "string", gsi1pk: "string", gsi1sk: "string" },
+          primaryIndex: { hashKey: "pk", rangeKey: "sk" },
+          globalIndexes: { gsi1: { hashKey: "gsi1pk", rangeKey: "gsi1sk" } },
+          ttl: "expiresAt",
+        })
+      : undefined;
+
+    // ---- DynamoDB: cloud runs ----------------------------------------------
+    const runTable = features.cloudRunner
+      ? new sst.aws.Dynamo("RunTable", {
+          fields: { runId: "string" },
+          primaryIndex: { hashKey: "runId" },
+          ttl: "expiresAt",
+        })
+      : undefined;
 
     // ---- Per-stage IAM roles ---------------------------------------------
     // Trusted by the account root; the presign Lambda is additionally granted
@@ -268,7 +311,21 @@ export default $config({
       FEATURES: JSON.stringify(features),
       EDITION: edition,
       EDGE_ORIGIN_TOKEN: edgeToken.value,
+      ...(auditTable ? { AUDIT_TABLE: auditTable.name, AUDIT_RETENTION_DAYS: String(auditRetentionDays) } : {}),
+      ...(runTable ? { RUN_TABLE: runTable.name } : {}),
     };
+
+    // Every vault/login handler appends to the audit trail (fail-closed).
+    const auditWrite = auditTable
+      ? [
+          {
+            actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
+            resources: [auditTable.arn],
+          },
+        ]
+      : [];
+    // Runner tokens are authorized against their run record.
+    const runRead = runTable ? [{ actions: ["dynamodb:GetItem"], resources: [runTable.arn] }] : [];
 
     // Read-only access-map lookups (canAccess / permissionsFor / isKnownUser).
     const accessRead = {
@@ -320,8 +377,16 @@ export default $config({
     // request is verified by STS on the workload's own credentials.
     const workloadDef = {
       handler: "functions/auth/workload.handler",
-      environment: { ...baseEnv, WORKLOAD_AUDIENCE: workloadAudience },
-      permissions: [accessRead],
+      environment: {
+        ...baseEnv,
+        WORKLOAD_AUDIENCE: workloadAudience,
+        ...(features.cloudRunner ? { RUNNER_ACCOUNT: accountId, RUNNER_TASK_ROLE_NAME: runnerTaskRoleName } : {}),
+      },
+      permissions: [
+        accessRead,
+        ...auditWrite,
+        ...(runTable ? [{ actions: ["dynamodb:UpdateItem"], resources: [runTable.arn] }] : []),
+      ],
     };
     api.route("GET /api/auth/workload", workloadDef);
     api.route("POST /api/auth/workload", workloadDef);
@@ -338,6 +403,8 @@ export default $config({
       permissions: [
         accessRead,
         { actions: ["kms:GenerateDataKey", "kms:Decrypt"], resources: [key.arn] },
+        ...auditWrite,
+        ...runRead,
       ],
     });
 
@@ -355,13 +422,15 @@ export default $config({
           actions: ["sts:AssumeRole"],
           resources: stageRoles.map((s) => s.role.arn),
         },
+        ...auditWrite,
+        ...runRead,
       ],
     });
 
     // Project/team administration (create, members, grants).
     const adminDef = {
       handler: "functions/admin/handler.handler",
-      environment: baseEnv,
+      environment: { ...baseEnv, CIEM_UNUSED_DAYS: String(ciemUnusedDays) },
       permissions: [
         {
           actions: [
@@ -374,10 +443,161 @@ export default $config({
           ],
           resources: [accessTable.arn, $interpolate`${accessTable.arn}/index/*`],
         },
+        // CIEM views read the audit trail (events + usage rollups).
+        ...(auditTable ? [{ actions: ["dynamodb:Query"], resources: [auditTable.arn] }] : []),
       ],
     };
     api.route("GET /api/admin/{proxy+}", adminDef);
     api.route("POST /api/admin/{proxy+}", adminDef);
+
+    // ---- Cloud runner (enterprise) ------------------------------------------
+    // See functions/lib/runner.ts. A VPC with public subnets and no NAT gateway
+    // (tasks get a public IP for egress; the security group admits nothing in),
+    // a cluster, and an SST Task that only exists to build the init image from
+    // ../cli and own the execution role and log group. Per-run task definitions
+    // are registered by the launch Lambda from that base.
+    const runnerApiUrlParam = `/enclave-envoy/${$app.stage}/runner/api-url`;
+    let runnerParts:
+      | { cluster: sst.aws.Cluster; task: sst.aws.Task; logGroup: $util.Output<string> }
+      | undefined;
+    if (features.cloudRunner && runTable) {
+      const vpc = new sst.aws.Vpc("RunnerVpc", { az: 2 });
+      const cluster = new sst.aws.Cluster("Runner", { vpc });
+
+      // The identity a run proves to the workload login. Trusts ECS tasks of
+      // THIS account only, so the role session name (= the ECS task id) cannot
+      // be chosen by anyone else. SST's own task role would also trust the
+      // account root in `sst dev`, which would let any in-account principal
+      // pick a session name and pose as a run. It has no permissions at all.
+      const runnerTaskRole = new aws.iam.Role("RunnerTaskRole", {
+        name: runnerTaskRoleName,
+        assumeRolePolicy: $jsonStringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "ecs-tasks.amazonaws.com" },
+              Action: "sts:AssumeRole",
+              Condition: {
+                StringEquals: { "aws:SourceAccount": accountId },
+                ArnLike: { "aws:SourceArn": `arn:aws:ecs:${region.name}:${accountId}:*` },
+              },
+            },
+          ],
+        }),
+      });
+
+      const task = new sst.aws.Task("RunnerInit", {
+        cluster,
+        image: { context: "../cli", dockerfile: "Dockerfile" },
+        command: ["runner-init"],
+        cpu: "0.25 vCPU",
+        memory: "0.5 GB",
+        taskRole: runnerTaskRole.name,
+        logging: { retention: "1 month" },
+        dev: false,
+      });
+
+      // Egress only: image pulls, STS and our own API.
+      const runnerSg = new aws.ec2.SecurityGroup("RunnerSg", {
+        vpcId: vpc.id,
+        description: "enclave cloud runner tasks: no ingress",
+        egress: [{ protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"], ipv6CidrBlocks: ["::/0"] }],
+      });
+
+      const logGroup = task.nodes.taskDefinition.containerDefinitions.apply(
+        (defs) => JSON.parse(defs)[0].logConfiguration.options["awslogs-group"] as string,
+      );
+      runnerParts = { cluster, task, logGroup };
+
+      const family = `enclave-run-${$app.stage}`;
+      const clusterArn = cluster.nodes.cluster.arn;
+      const runnerEnv = {
+        ...baseEnv,
+        RUNNER_CLUSTER: clusterArn,
+        RUNNER_LOG_GROUP: logGroup,
+      };
+
+      api.route("POST /api/runner/launch", {
+        handler: "functions/runner/launch.handler",
+        timeout: "30 seconds",
+        environment: {
+          ...runnerEnv,
+          RUNNER_BASE_TASK_DEF: task.taskDefinition,
+          RUNNER_FAMILY: family,
+          RUNNER_SUBNETS: $jsonStringify(task.subnets),
+          RUNNER_SECURITY_GROUPS: $jsonStringify([runnerSg.id]),
+          RUNNER_PUBLIC_IP: "true",
+          RUNNER_API_URL_PARAM: runnerApiUrlParam,
+          RUNNER_REGISTRIES: JSON.stringify(runnerRegistries),
+        },
+        permissions: [
+          accessRead,
+          ...auditWrite,
+          ...runRead,
+          { actions: ["dynamodb:PutItem"], resources: [runTable.arn] },
+          // Register/Describe/Deregister take no resource-level scoping in IAM.
+          {
+            actions: ["ecs:DescribeTaskDefinition", "ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"],
+            resources: ["*"],
+          },
+          {
+            actions: ["ecs:RunTask"],
+            resources: [`arn:aws:ecs:${region.name}:${accountId}:task-definition/${family}:*`],
+            conditions: [{ test: "ArnEquals", variable: "ecs:cluster", values: [clusterArn] }],
+          },
+          {
+            actions: ["iam:PassRole"],
+            resources: [runnerTaskRole.arn, task.nodes.executionRole.arn],
+            conditions: [{ test: "StringEquals", variable: "iam:PassedToService", values: ["ecs-tasks.amazonaws.com"] }],
+          },
+          {
+            actions: ["ssm:GetParameter"],
+            resources: [`arn:aws:ssm:${region.name}:${accountId}:parameter${runnerApiUrlParam}`],
+          },
+        ],
+      });
+
+      const manageDef = {
+        handler: "functions/runner/manage.handler",
+        environment: runnerEnv,
+        permissions: [
+          accessRead,
+          ...auditWrite,
+          ...runRead,
+          {
+            actions: ["ecs:DescribeTasks", "ecs:StopTask"],
+            resources: [$interpolate`arn:aws:ecs:${region.name}:${accountId}:task/${cluster.nodes.cluster.name}/*`],
+          },
+          {
+            actions: ["logs:GetLogEvents"],
+            resources: [$interpolate`arn:aws:logs:${region.name}:${accountId}:log-group:${logGroup}:log-stream:*`],
+          },
+        ],
+      };
+      api.route("POST /api/runner/status", manageDef);
+      api.route("POST /api/runner/stop", manageDef);
+      api.route("POST /api/runner/logs", manageDef);
+
+      new sst.aws.Cron("RunnerReaper", {
+        schedule: "rate(5 minutes)",
+        function: {
+          handler: "functions/runner/reaper.handler",
+          environment: { ENCLAVE_REGION: region.name, RUNNER_CLUSTER: clusterArn, RUN_TABLE: runTable.name },
+          permissions: [
+            { actions: ["dynamodb:BatchGetItem"], resources: [runTable.arn] },
+            {
+              actions: ["ecs:ListTasks"],
+              resources: [clusterArn],
+            },
+            {
+              actions: ["ecs:DescribeTasks", "ecs:StopTask"],
+              resources: [$interpolate`arn:aws:ecs:${region.name}:${accountId}:task/${cluster.nodes.cluster.name}/*`],
+            },
+          ],
+        },
+      });
+    }
 
     // ---- Edge WAF ---------------------------------------------------------
     // The Web ACL is the account's one shared ACL, `WAF202606`, owned by the
@@ -478,6 +698,17 @@ export default $config({
         },
       },
     });
+
+    // Where runner init containers reach the API. Written after the site
+    // exists and read by the launch Lambda at runtime, which breaks what would
+    // otherwise be a cycle (site -> API origin -> launch route -> site URL).
+    if (runnerParts) {
+      new aws.ssm.Parameter("RunnerApiUrl", {
+        name: runnerApiUrlParam,
+        type: "String",
+        value: $interpolate`${site.url}/api`,
+      });
+    }
 
     return {
       // What the CLI should be configured with. Goes through CloudFront, so it

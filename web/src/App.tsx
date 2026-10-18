@@ -8,6 +8,7 @@ import ProjectPage from "./pages/ProjectPage";
 import ProjectSettingsPage from "./pages/ProjectSettingsPage";
 import TeamsPage from "./pages/TeamsPage";
 import TeamPage from "./pages/TeamPage";
+import AccessReviewPage from "./pages/AccessReviewPage";
 
 export default function App() {
   const { session, logout } = useAuth();
@@ -52,6 +53,7 @@ export default function App() {
         <Route path="/projects/:project/settings" element={<ProjectSettingsPage />} />
         {flags.teams && <Route path="/teams" element={<TeamsPage />} />}
         {flags.teams && <Route path="/teams/:team" element={<TeamPage />} />}
+        {flags.ciem && <Route path="/projects/:project/access" element={<AccessReviewPage />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>

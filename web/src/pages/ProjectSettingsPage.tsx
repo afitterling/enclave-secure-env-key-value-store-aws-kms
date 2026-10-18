@@ -37,6 +37,7 @@ export default function ProjectSettingsPage() {
   const [inviteStages, setInviteStages] = useState<string[]>(["dev"]);
   const [grantTeamName, setGrantTeamName] = useState("");
   const [grantStages, setGrantStages] = useState<string[]>(["dev"]);
+  const [inviteHours, setInviteHours] = useState(0); // 0 = standing grant
   const [busy, setBusy] = useState(false);
 
   const isOwner = detail?.owner === session?.email;
@@ -69,7 +70,7 @@ export default function ProjectSettingsPage() {
   function invite(e: FormEvent) {
     e.preventDefault();
     void run(async () => {
-      await api.addProjectMember(project, inviteEmail.trim(), inviteStages);
+      await api.addProjectMember(project, inviteEmail.trim(), inviteStages, inviteHours || undefined);
       setInviteEmail("");
     });
   }
@@ -90,6 +91,11 @@ export default function ProjectSettingsPage() {
         </Link>
       </p>
       <h1>Members &amp; teams</h1>
+      {flags.ciem && isOwner && (
+        <p>
+          <Link to={`/projects/${project}/access`}>Access review: entitlements, findings, audit log →</Link>
+        </p>
+      )}
       <p className="sub">
         Inviting an email gives that address access to this project, and lets it log in
         even without an account of its own. Members see only the stages you grant.
@@ -115,6 +121,11 @@ export default function ProjectSettingsPage() {
                       {s}
                     </span>
                   ))}
+                  {m.grantExpiresAt && (
+                    <span className="tag" title={m.grantExpiresAt}>
+                      until {m.grantExpiresAt.slice(0, 16).replace("T", " ")}
+                    </span>
+                  )}
                   <span className={`tag ${m.role === "owner" ? "accent" : ""}`}>{m.role}</span>
                   {isOwner && m.role !== "owner" && (
                     <button
@@ -148,6 +159,18 @@ export default function ProjectSettingsPage() {
                   <div style={{ marginTop: 10 }}>
                     <StagePicker value={inviteStages} onChange={setInviteStages} />
                   </div>
+                  {flags.ciem && (
+                    <label className="field" style={{ marginTop: 14, maxWidth: 280 }}>
+                      <span>access ends</span>
+                      <select value={inviteHours} onChange={(e) => setInviteHours(Number(e.target.value))}>
+                        <option value={0}>never (standing grant)</option>
+                        <option value={4}>in 4 hours</option>
+                        <option value={24}>in 24 hours</option>
+                        <option value={168}>in 7 days</option>
+                        <option value={720}>in 30 days</option>
+                      </select>
+                    </label>
+                  )}
                 </form>
               </div>
             )}

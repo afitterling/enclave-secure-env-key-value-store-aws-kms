@@ -5,11 +5,12 @@ from __future__ import annotations
 import glob as globmod
 import os
 import sys
+import time
 from pathlib import Path
 
 import click
 
-from enclave import auth, container, sync, workload
+from enclave import auth, container, runner, sync, workload
 from enclave.client import ApiClient, ApiError
 from enclave.config import Config, Session
 
@@ -335,6 +336,133 @@ def run(
     finally:
         container.remove_secrets_dir(secrets_dir)
     sys.exit(code)
+
+
+# ---- cloud runner ------------------------------------------------------------
+
+
+@main.command(name="runner-init")
+@click.option("--dest", default=runner.DEFAULT_DEST, show_default=True, help="Where to write the secrets.")
+@click.option(
+    "--owner",
+    envvar="ENCLAVE_RUNNER_OWNER",
+    default=None,
+    help="UID:GID to hand the files to (dir 0700, files 0400). Default: leave ownership as-is.",
+)
+def runner_init(dest: str, owner: str | None) -> None:
+    """(Inside a cloud-runner task) fetch this run's secrets into --dest."""
+    api_url = os.environ.get("ENCLAVE_API_URL")
+    if not api_url:
+        click.echo("enclave runner-init: ENCLAVE_API_URL is not set", err=True)
+        sys.exit(2)
+    sys.exit(runner.runner_init(api_url.rstrip("/"), dest, lambda m: click.echo(m, err=True), owner=owner))
+
+
+@main.command(name="cloud-run", context_settings=_PASSTHROUGH)
+@click.option("-p", "--project", required=True)
+@click.option("-s", "--stage", required=True)
+@click.option("--file", "files", multiple=True, help="Env file to load (repeatable; default: all .env files).")
+@click.option(
+    "--mode",
+    type=click.Choice(["files", "env"]),
+    default="files",
+    show_default=True,
+    help=f"files: secrets at {container.SECRETS_MOUNT}; env: also sourced into CMD's environment.",
+)
+@click.option("--cpu", type=int, default=None, help=f"CPU units: {', '.join(map(str, runner.CPU_CHOICES))}.")
+@click.option("--memory", type=int, default=None, help="Memory in MiB.")
+@click.option("--env", "env_pairs", multiple=True, help="Non-secret KEY=VALUE (repeatable).")
+@click.option("--max-minutes", default=60, show_default=True, type=int, help="The run is stopped after this.")
+@click.option("--detach", is_flag=True, help="Print the run id and return immediately.")
+@click.argument("image")
+@click.argument("cmd", nargs=-1, type=click.UNPROCESSED)
+def cloud_run(
+    project: str,
+    stage: str,
+    files: tuple[str, ...],
+    mode: str,
+    cpu: int | None,
+    memory: int | None,
+    env_pairs: tuple[str, ...],
+    max_minutes: int,
+    detach: bool,
+    image: str,
+    cmd: tuple[str, ...],
+) -> None:
+    """Run IMAGE on the deployment's Fargate runner with the stage's secrets."""
+    try:
+        body = runner.launch_body(
+            project, stage, image, cmd, files, mode, cpu, memory, env_pairs, max_minutes
+        )
+    except runner.RunnerError as e:
+        raise SystemExit(str(e))
+    api = _client()
+    try:
+        launched = api.runner_launch(body)
+    except ApiError as e:
+        raise SystemExit(f"Launch failed: {e}")
+    run_id = launched["runId"]
+    if detach:
+        click.echo(run_id)
+        return
+    click.echo(f"[{run_id}] launched ({launched.get('mode', mode)} mode, stops after "
+               f"{launched.get('maxMinutes', max_minutes)} min)", err=True)
+    try:
+        code = runner.follow(api, run_id, click.echo, runner.stderr)
+    except ApiError as e:
+        raise SystemExit(f"[{run_id}] {e}")
+    sys.exit(code)
+
+
+@main.group()
+def runs() -> None:
+    """Inspect and control cloud-runner runs."""
+
+
+@runs.command(name="status")
+@click.argument("run_id")
+def runs_status(run_id: str) -> None:
+    """Show a run's state."""
+    try:
+        st = _client().runner_status(run_id)
+    except ApiError as e:
+        raise SystemExit(str(e))
+    for key in ("runId", "project", "stage", "image", "status", "desiredStatus", "exitCode",
+                "stoppedReason", "requestedBy", "createdAt", "startedAt", "stoppedAt", "deadline"):
+        if st.get(key) is not None:
+            click.echo(f"{key}: {st[key]}")
+
+
+@runs.command(name="stop")
+@click.argument("run_id")
+def runs_stop(run_id: str) -> None:
+    """Stop a run."""
+    try:
+        _client().runner_stop(run_id)
+    except ApiError as e:
+        raise SystemExit(str(e))
+    click.echo(f"[{run_id}] stop requested")
+
+
+@runs.command(name="logs")
+@click.argument("run_id")
+@click.option("--init", "init_logs", is_flag=True, help="Show the init container's log instead of the app's.")
+@click.option("--follow", is_flag=True, help="Keep printing until the run stops.")
+def runs_logs(run_id: str, init_logs: bool, follow: bool) -> None:
+    """Print a run's logs."""
+    api = _client()
+    tail = runner.LogTail(api, run_id, "init" if init_logs else "app")
+    try:
+        while True:
+            tail.drain(click.echo)
+            if not follow or api.runner_status(run_id).get("status") == runner.TERMINAL:
+                tail.drain(click.echo)
+                return
+            time.sleep(runner.POLL_INTERVAL)
+    except ApiError as e:
+        raise SystemExit(str(e))
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import { authorize } from "../lib/access.js";
 import { requirePrincipal, type Claims } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
+import { record } from "../lib/audit.js";
 
 /**
  * Envelope-encryption broker. The master key never leaves KMS.
@@ -55,8 +56,12 @@ export async function handler(event: APIGatewayProxyEventV2) {
   }
 
   const encryptionContext = { project, stage, app: "enclave-envoy" };
+  // Recorded before KMS is called; a failed write fails the request (lib/audit.ts).
+  const audit = () =>
+    record(event, { claims, project, stage, action: op === "generate" ? "generate" : "decrypt", actor: claims.act });
 
   if (op === "generate") {
+    await audit();
     const out = await kms.send(
       new GenerateDataKeyCommand({
         KeyId: process.env.KMS_KEY_ID,
@@ -72,6 +77,7 @@ export async function handler(event: APIGatewayProxyEventV2) {
 
   if (op === "decrypt") {
     if (!ciphertext) return badRequest("ciphertext is required for decrypt");
+    await audit();
     const out = await kms.send(
       new DecryptCommand({
         KeyId: process.env.KMS_KEY_ID, // pin the key; don't let the blob select it

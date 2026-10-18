@@ -9,9 +9,10 @@ export interface Flags {
   fileDelete: boolean;
   signup: boolean;
   machineIdentities: boolean;
+  ciem: boolean;
 }
 
-const defaults: Flags = { landing: true, teams: true, fileDelete: true, signup: false, machineIdentities: false };
+const defaults: Flags = { landing: true, teams: true, fileDelete: true, signup: false, machineIdentities: false, ciem: false };
 
 function parse(raw: string | undefined | null): Partial<Flags> {
   try {

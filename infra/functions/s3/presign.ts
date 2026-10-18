@@ -12,6 +12,7 @@ import { s3ForStage } from "../lib/assume.js";
 import { requirePrincipal, type Claims } from "../lib/jwt.js";
 import { ok, badRequest, unauthorized, forbidden, parseBody } from "../lib/response.js";
 import { edgeRejection } from "../lib/edge.js";
+import { record } from "../lib/audit.js";
 
 /**
  * Brokers S3 access for the CLI and web UI. Validates the user against the
@@ -53,6 +54,15 @@ export async function handler(event: APIGatewayProxyEventV2) {
     return forbidden("no access to this project/stage");
   }
 
+  if (op !== "upload" && op !== "download" && op !== "delete" && op !== "list") {
+    return badRequest("op must be 'upload', 'download', 'delete' or 'list'");
+  }
+  if (op !== "list" && (!file || !safeName(file))) return badRequest("a valid file name is required");
+  if (op === "delete" && !featureEnabled("fileDelete")) return forbidden("file deletion is not enabled");
+
+  // Recorded before any URL is minted; a failed write fails the request.
+  await record(event, { claims, project, stage, action: op, file, actor: claims.act });
+
   const bucket = process.env.BUCKET!;
   const prefix = `${project}/${stage}/`;
   // The STS session name shows up in CloudTrail for every S3 call made with
@@ -67,30 +77,14 @@ export async function handler(event: APIGatewayProxyEventV2) {
     return ok({ prefix, files });
   }
 
-  if (!file || !safeName(file)) return badRequest("a valid file name is required");
   const Key = `${prefix}${file}`;
-
-  if (op === "upload") {
-    const url = await getSignedUrl(s3, new PutObjectCommand({ Bucket: bucket, Key }), {
-      expiresIn: PRESIGN_TTL,
-    });
-    return ok({ url, method: "PUT", key: Key, expiresIn: PRESIGN_TTL });
-  }
-
-  if (op === "download") {
-    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key }), {
-      expiresIn: PRESIGN_TTL,
-    });
-    return ok({ url, method: "GET", key: Key, expiresIn: PRESIGN_TTL });
-  }
-
-  if (op === "delete") {
-    if (!featureEnabled("fileDelete")) return forbidden("file deletion is not enabled");
-    const url = await getSignedUrl(s3, new DeleteObjectCommand({ Bucket: bucket, Key }), {
-      expiresIn: PRESIGN_TTL,
-    });
-    return ok({ url, method: "DELETE", key: Key, expiresIn: PRESIGN_TTL });
-  }
-
-  return badRequest("op must be 'upload', 'download', 'delete' or 'list'");
+  const command =
+    op === "upload"
+      ? new PutObjectCommand({ Bucket: bucket, Key })
+      : op === "download"
+        ? new GetObjectCommand({ Bucket: bucket, Key })
+        : new DeleteObjectCommand({ Bucket: bucket, Key });
+  const url = await getSignedUrl(s3, command, { expiresIn: PRESIGN_TTL });
+  const method = op === "upload" ? "PUT" : op === "download" ? "GET" : "DELETE";
+  return ok({ url, method, key: Key, expiresIn: PRESIGN_TTL });
 }

@@ -60,6 +60,9 @@ enclave-envoy-tool/
     └── functions/
         ├── lib/{jwt,access,assume,response}.ts   # access.ts = DynamoDB access map
         ├── lib/{machines,oidc,awsiam}.ts       # machine-identity bindings + verifiers
+        ├── lib/{audit,ciem,runner}.ts          # enterprise: audit trail, findings, run task defs
+        ├── admin/ciem.ts                       # enterprise: entitlements + audit routes
+        ├── runner/{launch,manage,reaper}.ts    # enterprise: Fargate cloud runner
         ├── auth/{request,verify,workload}.ts
         ├── access/whoami.ts
         ├── admin/handler.ts   # projects/teams/members/grants (web UI)
@@ -222,6 +225,112 @@ How secrets reach the container:
 
 `--dry-run` prints the engine command, which contains secret names only.
 Engine: `--engine`, else `$ENCLAVE_CONTAINER_ENGINE`, else `docker`, else `podman`.
+
+## Enterprise: entitlement management (CIEM) and the cloud runner
+
+Two enterprise features build on machine identities. Both are off in this
+config (`features.ciem`, `features.cloudRunner`). The enterprise edition turns
+them on in its presets.
+
+### Entitlement management (`ciem`)
+
+- **Audit trail.** Every decrypt, data-key mint, upload, download, delete,
+  list, workload login and cloud run is written to an `AuditTable` before the
+  request is answered. If the write fails, the request fails (fail-closed), so
+  there is no unrecorded access. Events expire after `auditRetentionDays` (90).
+  A per-principal, per-stage usage rollup (last read and write, counts) is kept
+  alongside them. Runner activity is counted for the human who launched the run.
+- **Effective entitlements.** `GET /api/admin/projects/<p>/entitlements`
+  (owner only) lists every path to every stage: ownership, direct membership,
+  team grants (enterprise `teams`) and machine bindings. Each path shows when it
+  was last used, and the response includes a *permission utilization* score:
+  the share of granted (principal, stage) pairs used in the window.
+- **Findings,** each with a one-click fix on the web *Access review* page:
+
+  | Rule            | Severity        | Fix                         |
+  | --------------- | --------------- | --------------------------- |
+  | `inactive`: holds stages, used none in `ciemUnusedDays` (30) | high with prod | revoke |
+  | `unused-stage`: active, but never on this stage | high for prod | remove that stage |
+  | `unused-write`: machine with write that only reads | high with prod | make read-only |
+  | `any-branch`: GitHub binding without `ref`/`environment`, so any branch or collaborator's workflow gets the secrets | high with prod | edit the binding |
+  | `wildcard-prod`: `*` in a prod binding's subject | medium | edit the binding |
+  | `all-stages`: one binding on every stage | low | split it |
+  | `standing-prod`: human prod access with no expiry | low | expire in 7 days |
+  | `expired-grant`: expired, still on file | low | remove |
+
+  Grants younger than the window are not flagged as unused. Team-derived paths
+  are reported without a fix, since the change belongs on the team grant.
+- **Time-boxed (just-in-time) grants.** Members and bindings accept
+  `expiresInHours` (1–720). Past that point, `canAccess`, `permissionsFor` and
+  `authorize` ignore the grant, and the item stays on file so the review can
+  show it.
+- **Audit log.** `GET /api/admin/projects/<p>/audit` returns events newest
+  first, with a cursor and an optional `principal` filter.
+
+### Cloud runner: run an image on Fargate with a stage's secrets (`cloudRunner`)
+
+```bash
+enclave cloud-run -p webapp -s prod -- ghcr.io/acme/migrate@sha256:<digest>
+enclave cloud-run -p webapp -s prod --mode env --cpu 512 --memory 1024 \
+  --env LOG_LEVEL=info --max-minutes 30 -- ghcr.io/acme/api@sha256:<digest> ./bin/job --once
+enclave cloud-run -p webapp -s prod --detach -- ghcr.io/acme/job@sha256:<digest>   # prints the run id
+
+enclave runs status <run-id>
+enclave runs logs <run-id> --follow          # app log; --init for the init container's
+enclave runs stop <run-id>
+```
+
+`cloud-run` follows the run: state transitions go to stderr, the app's log goes to
+stdout, and it exits with the app's exit code (1 if the app never started). Ctrl-C
+once stops the run and waits for it to stop; Ctrl-C twice stops waiting (exit 130).
+Any principal with read access to the stage can launch, including a machine
+identity, so a CI job can `machine-login` and then `cloud-run`.
+
+What happens:
+
+1. **Launch.** The server checks your access, requires a `@sha256:` digest (no
+   opt-out on the cloud), registers a one-off task definition and starts it. Every
+   run is stopped after `--max-minutes` (1–240, default 60).
+2. **Init container.** The task's first container runs `enclave runner-init`. It
+   proves *which run it is* with the task's own IAM role: a signed
+   `sts:GetCallerIdentity`, whose role session name ECS sets to the task id. The
+   server answers with a **one-time, read-only** token for exactly that run's
+   project and stage. A second login for the same run is refused.
+3. **Secrets on the task's ephemeral volume.** The init step decrypts in memory
+   and writes, into a 0700 directory owned by the app's user:
+   - one 0400 file per key at `/run/secrets/<KEY>`;
+   - `/run/secrets/.env`;
+   - `/run/secrets/env.sh`, POSIX `export KEY='…'` lines.
+
+   Fargate encrypts that storage and discards it with the task. The init step
+   prints a key count, never a value. If it fails, the app never starts.
+4. **App container.** Your image runs with a read-only root filesystem, as a
+   non-root user, with every Linux capability dropped and secrets mounted
+   read-only. `--mode files` (default) leaves the image's entrypoint alone, and
+   the app reads `/run/secrets/<KEY>`, `_FILE` style. `--mode env` replaces the
+   entrypoint with `sh -c '. /run/secrets/env.sh && exec "$@"'`. That needs a
+   `/bin/sh` in the image and an explicit command.
+
+No plaintext passes through the API. The server brokers KMS and S3 for the init
+container as it does for any other client. `--env` is for non-secret values only:
+those values are stored in the task definition.
+
+Deploying with `cloudRunner` on needs Docker at deploy time, because SST builds
+the init image from `cli/Dockerfile`, x86_64. It also creates a VPC with public
+subnets and **no NAT gateway** (tasks get a public IP; their security group
+admits nothing in), an ECS cluster, the runner task role and a reaper Lambda.
+The reaper runs every 5 minutes and stops runs past their deadline, plus any
+runner task without a run record. The runner task role trusts only ECS tasks of
+this account. It is deliberately not SST's default role, which in `sst dev`
+also trusts the account root and would let any in-account principal choose a
+session name and pose as a run. `runnerRegistries` restricts which registries
+images may come from.
+
+The launch Lambda needs `ecs:RegisterTaskDefinition`,
+`ecs:DeregisterTaskDefinition` and `ecs:DescribeTaskDefinition` on `"*"`,
+because IAM offers no resource-level scoping for them. `ecs:RunTask` is scoped
+to the `enclave-run-<stage>` family and the runner cluster, and `iam:PassRole`
+to the two runner roles for `ecs-tasks.amazonaws.com`.
 
 ## Deploying a production stage
 

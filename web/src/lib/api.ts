@@ -106,12 +106,13 @@ export interface MachineBinding {
   description?: string;
   createdBy?: string;
   createdAt?: string;
+  grantExpiresAt?: string;
 }
 
 export interface ProjectDetail {
   project: string;
   owner: string;
-  members: { email: string; role: string; stages: string[] }[];
+  members: { email: string; role: string; stages: string[]; grantExpiresAt?: string }[];
   teams: { team: string; stages: string[] }[];
   machines?: MachineBinding[];
 }
@@ -120,8 +121,10 @@ export const listProjects = () => request<{ projects: ProjectSummary[] }>("/admi
 export const createProject = (project: string) =>
   request<{ project: string; role: string }>("/admin/projects", { body: { project } });
 export const projectDetail = (project: string) => request<ProjectDetail>(`/admin/projects/${project}`);
-export const addProjectMember = (project: string, email: string, stages: string[]) =>
-  request<{ ok: true }>(`/admin/projects/${project}/members`, { body: { email, stages } });
+export const addProjectMember = (project: string, email: string, stages: string[], expiresInHours?: number) =>
+  request<{ ok: true }>(`/admin/projects/${project}/members`, {
+    body: { email, stages, ...(expiresInHours ? { expiresInHours } : {}) },
+  });
 export const removeProjectMember = (project: string, email: string) =>
   request<{ ok: true }>(`/admin/projects/${project}/members/remove`, { body: { email } });
 export const grantTeam = (project: string, team: string, stages: string[]) =>
@@ -156,7 +159,81 @@ export const removeTeamMember = (team: string, email: string) =>
 
 export const workloadInfo = () =>
   request<{ audience: string; serverIdHeader: string }>("/auth/workload", { auth: false });
-export const upsertMachine = (project: string, binding: Omit<MachineBinding, "createdBy" | "createdAt">) =>
-  request<{ ok: true; id: string }>(`/admin/projects/${project}/machines`, { body: binding });
+export const upsertMachine = (
+  project: string,
+  binding: Omit<MachineBinding, "createdBy" | "createdAt" | "grantExpiresAt">,
+  expiresInHours?: number,
+) =>
+  request<{ ok: true; id: string }>(`/admin/projects/${project}/machines`, {
+    body: { ...binding, ...(expiresInHours ? { expiresInHours } : {}) },
+  });
 export const removeMachine = (project: string, id: string) =>
   request<{ ok: true }>(`/admin/projects/${project}/machines/remove`, { body: { id } });
+
+// ---- admin: CIEM (enterprise) ----------------------------------------------
+
+export interface StageUsage {
+  lastRead?: string;
+  lastWrite?: string;
+  reads: number;
+  writes: number;
+}
+
+export interface Entitlement {
+  principal: string;
+  kind: "human" | "machine";
+  via: string;
+  stages: string[];
+  access: "read" | "write";
+  grantedAt?: string;
+  grantExpiresAt?: string;
+  expired: boolean;
+  usage: Record<string, StageUsage>;
+  lastUsed?: string;
+}
+
+export type Fix =
+  | { kind: "removeStage"; principal: string; via: string; stage: string }
+  | { kind: "removePrincipal"; principal: string; via: string }
+  | { kind: "downgrade"; principal: string; via: string }
+  | { kind: "timebox"; principal: string; via: string };
+
+export interface Finding {
+  id: string;
+  rule: string;
+  severity: "high" | "medium" | "low";
+  principal: string;
+  via: string;
+  stage?: string;
+  title: string;
+  detail: string;
+  fix?: Fix;
+}
+
+export interface EntitlementReport {
+  project: string;
+  windowDays: number;
+  utilization: { granted: number; used: number; ratio: number };
+  entitlements: Entitlement[];
+  findings: Finding[];
+}
+
+export interface AuditEvent {
+  at: string;
+  principal: string;
+  kind: "human" | "machine" | "runner";
+  actor?: string;
+  stage: string;
+  action: string;
+  file?: string;
+  ip?: string;
+  src?: string;
+  detail?: Record<string, string>;
+}
+
+export const entitlements = (project: string) =>
+  request<EntitlementReport>(`/admin/projects/${project}/entitlements`);
+export const auditLog = (project: string, cursor?: string | null) =>
+  request<{ events: AuditEvent[]; cursor: string | null }>(
+    `/admin/projects/${project}/audit?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+  );

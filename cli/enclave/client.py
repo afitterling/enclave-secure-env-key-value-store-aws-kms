@@ -8,7 +8,9 @@ import requests
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 class ApiClient:
@@ -38,7 +40,7 @@ class ApiClient:
                 msg = r.json().get("error", r.text)
             except Exception:
                 msg = r.text
-            raise ApiError(f"{r.status_code}: {msg}")
+            raise ApiError(f"{r.status_code}: {msg}", status=r.status_code)
         return r.json() if r.content else {}
 
     # ---- auth -------------------------------------------------------------
@@ -78,3 +80,19 @@ class ApiClient:
         if file is not None:
             body["file"] = file
         return self._post("/s3/presign", body, auth=True)
+
+    # ---- cloud runner -----------------------------------------------------
+    def runner_launch(self, body: dict) -> dict:
+        return self._post("/runner/launch", body, auth=True)
+
+    def runner_status(self, run_id: str) -> dict:
+        return self._post("/runner/status", {"runId": run_id}, auth=True)
+
+    def runner_stop(self, run_id: str) -> dict:
+        return self._post("/runner/stop", {"runId": run_id}, auth=True)
+
+    def runner_logs(self, run_id: str, container: str = "app", next_token: Optional[str] = None) -> dict:
+        body = {"runId": run_id, "container": container}
+        if next_token:
+            body["nextToken"] = next_token
+        return self._post("/runner/logs", body, auth=True)

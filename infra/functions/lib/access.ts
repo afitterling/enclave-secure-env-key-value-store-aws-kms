@@ -46,6 +46,15 @@ export function validStages(): string[] {
 interface MemberItem {
   role?: "owner" | "member";
   stages?: string[];
+  grantExpiresAt?: string;
+}
+
+/** Time-boxed grants (CIEM): an ISO `grantExpiresAt` on a membership or a
+ * machine binding. Past it, the grant is ignored everywhere; the item stays so
+ * the entitlement view can show it as expired until someone cleans it up. */
+export function grantExpired(item: { grantExpiresAt?: unknown } | undefined): boolean {
+  const at = item?.grantExpiresAt;
+  return typeof at === "string" && Date.parse(at) <= Date.now();
 }
 
 interface GrantItem {
@@ -128,6 +137,7 @@ export async function permissionsFor(email: string): Promise<Record<string, stri
   for (const item of mine.Items ?? []) {
     const target = item.gsi1sk as string;
     if (target.startsWith("PROJECT#")) {
+      if (item.role !== "owner" && grantExpired(item)) continue;
       const project = target.slice("PROJECT#".length);
       add(project, item.role === "owner" ? stages : ((item.stages as string[]) ?? []));
     } else if (target.startsWith("TEAM#")) {
@@ -178,6 +188,7 @@ export async function canAccess(email: string, project: string, stage: string): 
   const member = direct.Item as MemberItem | undefined;
   if (member) {
     if (member.role === "owner") return true;
+    if (grantExpired(member)) return false;
     if (Array.isArray(member.stages) && member.stages.includes(stage)) return true;
   }
 
@@ -225,9 +236,11 @@ export async function authorize(
 ): Promise<boolean> {
   if (claims.typ !== "machine") return canAccess(claims.sub, project, stage);
 
-  if (!featureEnabled("machineIdentities")) return false;
   if (!validStages().includes(stage)) return false;
   if (claims.prj !== project) return false;
+  if (claims.run) return authorizeRunner(claims, project, stage, action);
+
+  if (!featureEnabled("machineIdentities")) return false;
   const out = await ddb.send(
     new GetCommand({
       TableName: table(),
@@ -235,7 +248,28 @@ export async function authorize(
     }),
   );
   const binding = out.Item;
-  if (!binding || binding.rev !== claims.rev) return false;
+  if (!binding || binding.rev !== claims.rev || grantExpired(binding)) return false;
   if (!Array.isArray(binding.stages) || !binding.stages.includes(stage)) return false;
   return action === "read" || binding.access === "write";
+}
+
+/**
+ * Cloud-runner tokens (enterprise `cloudRunner` feature) are read-only, valid
+ * only for the run's own project and stage, and only while the run record
+ * exists with the same nonce and its deadline has not passed.
+ */
+async function authorizeRunner(
+  claims: Claims,
+  project: string,
+  stage: string,
+  action: VaultAction,
+): Promise<boolean> {
+  if (!featureEnabled("cloudRunner") || action !== "read" || !process.env.RUN_TABLE) return false;
+  const out = await ddb.send(
+    new GetCommand({ TableName: process.env.RUN_TABLE, Key: { runId: claims.run } }),
+  );
+  const run = out.Item;
+  if (!run || run.nonce !== claims.rev) return false;
+  if (run.project !== project || run.stage !== stage) return false;
+  return typeof run.deadline === "number" && run.deadline > Math.floor(Date.now() / 1000);
 }
