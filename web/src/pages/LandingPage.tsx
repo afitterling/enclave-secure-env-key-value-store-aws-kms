@@ -45,6 +45,9 @@ export default function LandingPage() {
           enclave<b>-envoy</b>
         </span>
         <div className="spacer" />
+        <Link className="btn quiet" to="/docs">
+          docs
+        </Link>
         <a
           className="btn quiet"
           href="https://github.com/afitterling/enclave-secure-env-key-value-store-aws-kms"
@@ -303,7 +306,7 @@ export default function LandingPage() {
           {flags.signup ? "passwordless" : "invite-only"}
         </span>
         <span>
-          <a href="#imprint">imprint</a> · <Link to="/login">sign in →</Link>
+          <Link to="/docs">docs</Link> · <a href="#imprint">imprint</a> · <Link to="/login">sign in →</Link>
           {flags.signup && (
             <>
               {" "}

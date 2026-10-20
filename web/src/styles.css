@@ -820,3 +820,170 @@ pre.code {
 .land-foot a:hover {
   color: var(--accent);
 }
+
+/* ---- docs (/docs) ---------------------------------------------------- */
+
+.docs {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 40px;
+  padding: 36px 0 64px;
+}
+
+.docs-nav {
+  position: sticky;
+  top: 20px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.docs-nav a {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-dim);
+  text-decoration: none;
+  padding: 6px 10px;
+  border-left: 2px solid transparent;
+}
+
+.docs-nav a:hover {
+  color: var(--ink);
+}
+
+.docs-nav a.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+.prose {
+  max-width: 78ch;
+  min-width: 0;
+}
+
+.prose h1 {
+  font-size: 26px;
+  margin-bottom: 18px;
+}
+
+.prose h2 {
+  margin: 40px 0 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.prose h3 {
+  font-size: 15px;
+  margin: 28px 0 10px;
+}
+
+.prose p,
+.prose li {
+  color: var(--ink);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 22px;
+}
+
+.prose li + li {
+  margin-top: 4px;
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-dim);
+}
+
+.prose code {
+  font-size: 0.9em;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  padding: 0 4px;
+}
+
+.prose pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  padding: 14px 18px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.prose pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+.prose pre code.language-mermaid::before {
+  content: "sequence diagram";
+  display: block;
+  margin-bottom: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
+}
+
+.prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  margin: 14px 0;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-dim);
+  background: var(--bg-raise);
+}
+
+.prose blockquote {
+  margin: 16px 0;
+  padding: 4px 16px;
+  border-left: 2px solid var(--accent-dim);
+  color: var(--ink-dim);
+}
+
+@media (max-width: 760px) {
+  .docs {
+    grid-template-columns: 1fr;
+    gap: 20px;
+    padding-top: 20px;
+  }
+
+  .docs-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .docs-nav .kicker {
+    width: 100%;
+  }
+
+  .docs-nav a {
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .docs-nav a.active {
+    border-bottom-color: var(--accent);
+  }
+}

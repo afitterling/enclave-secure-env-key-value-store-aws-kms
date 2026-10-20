@@ -9,6 +9,7 @@ import ProjectSettingsPage from "./pages/ProjectSettingsPage";
 import TeamsPage from "./pages/TeamsPage";
 import TeamPage from "./pages/TeamPage";
 import AccessReviewPage from "./pages/AccessReviewPage";
+import DocsPage from "./pages/DocsPage";
 
 export default function App() {
   const { session, logout } = useAuth();
@@ -19,6 +20,7 @@ export default function App() {
         <Route path="/" element={flags.landing ? <LandingPage /> : <LoginPage />} />
         <Route path="/login" element={<LoginPage />} />
         {flags.signup && <Route path="/signup" element={<LoginPage mode="signup" />} />}
+        <Route path="/docs/:slug?" element={<DocsPage standalone />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     );
@@ -39,6 +41,9 @@ export default function App() {
               Teams
             </NavLink>
           )}
+          <NavLink to="/docs" className={({ isActive }) => (isActive ? "active" : "")}>
+            Docs
+          </NavLink>
         </nav>
         <div className="who">
           <span>{session.email}</span>
@@ -54,6 +59,7 @@ export default function App() {
         {flags.teams && <Route path="/teams" element={<TeamsPage />} />}
         {flags.teams && <Route path="/teams/:team" element={<TeamPage />} />}
         {flags.ciem && <Route path="/projects/:project/access" element={<AccessReviewPage />} />}
+        <Route path="/docs/:slug?" element={<DocsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>
